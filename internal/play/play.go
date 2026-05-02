@@ -1180,10 +1180,12 @@ func (m Model) renderHand() string {
 }
 
 // renderOpenMelds renders the human's called melds (pon, chi, ankan, minkan,
-// shouminkan) as a horizontally-joined block, prefixed with a seat-source
-// marker per meld: [E]/[S]/[W]/[N] for melds called from a discarder seat,
-// [A] for ankan (concealed kan, no source seat). Returns "" when the human
-// has no open melds — preserving byte-identical pre-change rendering.
+// shouminkan) as a horizontally-joined block. The seat-source marker
+// ([E]/[S]/[W]/[N]) is attached immediately to the LEFT of the called tile
+// — the tile most recently grabbed for that meld — so the player can see
+// which physical tile came from another seat. Ankan has no called tile, so
+// [A] is rendered as a meld-level prefix. Returns "" when the human has no
+// open melds — preserving byte-identical pre-change rendering.
 func (m Model) renderOpenMelds() string {
 	if m.game == nil {
 		return ""
@@ -1198,8 +1200,14 @@ func (m Model) renderOpenMelds() string {
 			blocks = append(blocks, m.handGap())
 		}
 		marker := openMeldMarker(meld)
-		blocks = append(blocks, lipgloss.NewStyle().Render(marker+" "))
-		for _, t := range meld.Tiles {
+		calledIdx := calledTileIndex(meld)
+		if calledIdx < 0 {
+			blocks = append(blocks, lipgloss.NewStyle().Render(marker+" "))
+		}
+		for j, t := range meld.Tiles {
+			if j == calledIdx {
+				blocks = append(blocks, lipgloss.NewStyle().Render(marker))
+			}
 			tileLines := m.renderer.Tile(t)
 			blocks = append(blocks, strings.Join(tileLines, "\n"))
 		}
@@ -1225,6 +1233,34 @@ func openMeldMarker(meld game.Meld) string {
 		return "[N]"
 	}
 	return "[?]"
+}
+
+// calledTileIndex returns the index within meld.Tiles of the tile most
+// recently grabbed for that meld — the one whose seat-source marker is
+// attached as a pointer. Returns -1 for ankan (no called tile; marker
+// renders as a meld-level prefix instead).
+//
+// Tile positions follow how the engine constructs each meld kind:
+//   - Pon         [d, d, d]              → called at idx 0
+//   - Chi         [c1, c2, d]            → called at idx 2 (last)
+//   - Minkan      [d, c1, c2, c3]        → called at idx 0
+//   - Shouminkan  [d, d, d, upgrade]     → newest grab at idx 3 (upgrade)
+//   - Ankan       (concealed)            → -1
+func calledTileIndex(meld game.Meld) int {
+	switch meld.Kind {
+	case game.MeldPon:
+		return 0
+	case game.MeldChi:
+		return len(meld.Tiles) - 1
+	case game.MeldKan:
+		switch meld.KanKind {
+		case game.KanMinkan:
+			return 0
+		case game.KanShouminkan:
+			return len(meld.Tiles) - 1
+		}
+	}
+	return -1
 }
 
 // shouldShowDrawnTileGap reports whether the drawn-tile gap separator should

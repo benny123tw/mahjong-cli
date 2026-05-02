@@ -1348,6 +1348,103 @@ func TestRenderHandPreservesByteIdenticalOutputWhenNoMelds(t *testing.T) {
 	}
 }
 
+func TestRenderOpenMeldsMarkerPointsAtCalledTile(t *testing.T) {
+	g := game.New(7)
+	g.SetTestHand(game.SeatSouth, []tile.Tile{
+		{ID: tile.M1},
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.P4},
+		{ID: tile.P5},
+		{ID: tile.P6},
+		{ID: tile.S7},
+		{ID: tile.S8},
+		{ID: tile.S9},
+		{ID: tile.M4},
+		{ID: tile.M5},
+		{ID: tile.SouthWind},
+		{ID: tile.SouthWind},
+	})
+	// Chi: tiles = [c1, c2, called]. Called tile is the 3rd (M4), marker
+	// should sit between M3 and M4.
+	g.SetTestMeld(game.SeatSouth, game.Meld{
+		Kind:  game.MeldChi,
+		Tiles: []tile.Tile{{ID: tile.M2}, {ID: tile.M3}, {ID: tile.M4}},
+		From:  game.SeatWest,
+	})
+
+	m := NewWithGame(UnicodeRenderer{}, g)
+	out := m.renderOpenMelds()
+
+	r := UnicodeRenderer{}
+	m2Glyph := strings.Join(r.Tile(tile.Tile{ID: tile.M2}), "\n")
+	m3Glyph := strings.Join(r.Tile(tile.Tile{ID: tile.M3}), "\n")
+	m4Glyph := strings.Join(r.Tile(tile.Tile{ID: tile.M4}), "\n")
+
+	idxM2 := strings.Index(out, m2Glyph)
+	idxM3 := strings.Index(out, m3Glyph)
+	idxM4 := strings.Index(out, m4Glyph)
+	idxMarker := strings.Index(out, "[W]")
+	if idxM2 < 0 || idxM3 < 0 || idxM4 < 0 || idxMarker < 0 {
+		t.Fatalf("expected all of [W], M2, M3, M4 in output. Output:\n%s", out)
+	}
+	if !(idxM2 < idxM3 && idxM3 < idxMarker && idxMarker < idxM4) {
+		t.Errorf(
+			"expected order: M2 < M3 < [W] < M4 (marker pointing at called tile M4). "+
+				"Got M2=%d M3=%d [W]=%d M4=%d. Output:\n%s",
+			idxM2, idxM3, idxMarker, idxM4, out,
+		)
+	}
+}
+
+func TestRenderOpenMeldsAnkanKeepsMarkerAsPrefix(t *testing.T) {
+	g := game.New(7)
+	g.SetTestHand(game.SeatSouth, []tile.Tile{
+		{ID: tile.M1},
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.P4},
+		{ID: tile.P5},
+		{ID: tile.P6},
+		{ID: tile.S7},
+		{ID: tile.S8},
+		{ID: tile.S9},
+		{ID: tile.M4},
+		{ID: tile.M5},
+		{ID: tile.SouthWind},
+		{ID: tile.SouthWind},
+	})
+	g.SetTestMeld(game.SeatSouth, game.Meld{
+		Kind:    game.MeldKan,
+		KanKind: game.KanAnkan,
+		Tiles: []tile.Tile{
+			{ID: tile.EastWind},
+			{ID: tile.EastWind},
+			{ID: tile.EastWind},
+			{ID: tile.EastWind},
+		},
+	})
+
+	m := NewWithGame(UnicodeRenderer{}, g)
+	out := m.renderOpenMelds()
+
+	r := UnicodeRenderer{}
+	eastGlyph := strings.Join(r.Tile(tile.Tile{ID: tile.EastWind}), "\n")
+
+	idxMarker := strings.Index(out, "[A]")
+	idxFirstEast := strings.Index(out, eastGlyph)
+	if idxMarker < 0 || idxFirstEast < 0 {
+		t.Fatalf("expected [A] and East tile in output. Output:\n%s", out)
+	}
+	if idxMarker >= idxFirstEast {
+		t.Errorf(
+			"[A] should precede the first ankan tile (no called tile to point at). "+
+				"Got [A]=%d, first East=%d. Output:\n%s",
+			idxMarker, idxFirstEast, out,
+		)
+	}
+}
+
 func TestRenderHandWrapsMeldsWhenRowExceeds80Columns(t *testing.T) {
 	g := game.New(7)
 	g.SetTestHand(game.SeatSouth, []tile.Tile{
