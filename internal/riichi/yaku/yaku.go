@@ -1,0 +1,685 @@
+// Package yaku detects v1 yaku given a winning Decomposition, Hand, and game
+// Context. Each detector is independent and returns zero or more Matches; the
+// orchestrator (Evaluate) runs every detector against a single decomposition
+// and applies one cross-cutting rule — if any yakuman is matched, non-yakuman
+// matches are dropped.
+package yaku
+
+import (
+	"slices"
+
+	"github.com/benny123tw/mahjong-cli/internal/riichi/hand"
+	"github.com/benny123tw/mahjong-cli/internal/riichi/tile"
+)
+
+type Context struct {
+	SeatWind  uint8
+	RoundWind uint8
+	Riichi    bool
+
+	// Group C situational flags. The game loop populates these at win-check
+	// time. Detectors read each flag directly; the game loop is responsible
+	// for the timing rules (e.g., clearing Ippatsu on any intervening call).
+	//
+	// Rinshan and Chankan ship in v1 but are never set to true because kan
+	// is unsupported. Their detectors exist so add-kan-support wires them in
+	// without engine changes.
+	Ippatsu      bool
+	Haitei       bool
+	Houtei       bool
+	Rinshan      bool
+	Chankan      bool
+	DoubleRiichi bool
+	Tenhou       bool
+	Chiihou      bool
+}
+
+type Match struct {
+	Name      string
+	Han       int
+	IsYakuman bool
+}
+
+type Detector func(d hand.Decomposition, h hand.Hand, ctx Context) []Match
+
+func Detectors() []Detector {
+	return []Detector{
+		detectKokushi,
+		detectTenhou,
+		detectChiihou,
+		detectRiichi,
+		detectDoubleRiichi,
+		detectIppatsu,
+		detectMenzenTsumo,
+		detectPinfu,
+		detectTanyao,
+		detectYakuhai,
+		detectIipeikou,
+		detectToitoi,
+		detectHonitsu,
+		detectSanshokuDoujun,
+		detectIttsuu,
+		detectChinitsu,
+		detectHonroutou,
+		detectChanta,
+		detectJunchan,
+		detectSanankou,
+		detectSanshokuDoukou,
+		detectShousangen,
+		detectRyanpeikou,
+		detectHaitei,
+		detectHoutei,
+		detectRinshan,
+		detectChankan,
+	}
+}
+
+// Evaluate runs every detector and returns the matched yaku for one
+// decomposition. Two cross-cutting rules are applied after detection:
+//   - If any yakuman matches, non-yakuman yaku are dropped.
+//   - Ryanpeikou supersedes Iipeikou (when both match the same decomposition,
+//     iipeikou is dropped).
+func Evaluate(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	var all []Match
+	for _, det := range Detectors() {
+		all = append(all, det(d, h, ctx)...)
+	}
+
+	hasRyanpeikou := false
+	for _, m := range all {
+		if m.Name == "Ryanpeikou" {
+			hasRyanpeikou = true
+			break
+		}
+	}
+	if hasRyanpeikou {
+		filtered := all[:0]
+		for _, m := range all {
+			if m.Name == "Iipeikou" {
+				continue
+			}
+			filtered = append(filtered, m)
+		}
+		all = filtered
+	}
+
+	// Double riichi supersedes Riichi: when both match the same evaluation,
+	// drop the regular riichi line.
+	hasDoubleRiichi := false
+	for _, m := range all {
+		if m.Name == "Double riichi" {
+			hasDoubleRiichi = true
+			break
+		}
+	}
+	if hasDoubleRiichi {
+		filtered := all[:0]
+		for _, m := range all {
+			if m.Name == "Riichi" {
+				continue
+			}
+			filtered = append(filtered, m)
+		}
+		all = filtered
+	}
+
+	hasYakuman := false
+	for _, m := range all {
+		if m.IsYakuman {
+			hasYakuman = true
+			break
+		}
+	}
+	if !hasYakuman {
+		return all
+	}
+	kept := all[:0]
+	for _, m := range all {
+		if m.IsYakuman {
+			kept = append(kept, m)
+		}
+	}
+	return kept
+}
+
+func detectKokushi(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if d.Form == hand.FormKokushi {
+		return []Match{{Name: "Kokushi musou", Han: 13, IsYakuman: true}}
+	}
+	return nil
+}
+
+func detectRiichi(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if ctx.Riichi && !h.Open {
+		return []Match{{Name: "Riichi", Han: 1}}
+	}
+	return nil
+}
+
+func detectMenzenTsumo(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if h.IsTsumo && !h.Open {
+		return []Match{{Name: "Menzen tsumo", Han: 1}}
+	}
+	return nil
+}
+
+func detectPinfu(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if d.Form != hand.FormStandard || h.Open {
+		return nil
+	}
+	for _, m := range d.Sets() {
+		if m.Kind != hand.MeldSequence {
+			return nil
+		}
+	}
+	if isYakuhaiTile(d.Pair().Base, ctx) {
+		return nil
+	}
+	if !ryanmenPossible(d, h.Winning) {
+		return nil
+	}
+	return []Match{{Name: "Pinfu", Han: 1}}
+}
+
+func detectTanyao(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	for _, t := range h.Concealed {
+		if t.IsTerminalOrHonor() {
+			return nil
+		}
+	}
+	return []Match{{Name: "Tanyao", Han: 1}}
+}
+
+func detectYakuhai(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if d.Form != hand.FormStandard {
+		return nil
+	}
+	var matches []Match
+	for _, m := range d.Sets() {
+		if m.Kind != hand.MeldTriplet {
+			continue
+		}
+		t := tile.Tile{ID: m.Base}
+		if !t.IsHonor() {
+			continue
+		}
+		if m.Base == ctx.RoundWind {
+			matches = append(matches, Match{Name: "Yakuhai (round wind)", Han: 1})
+		}
+		if m.Base == ctx.SeatWind {
+			matches = append(matches, Match{Name: "Yakuhai (seat wind)", Han: 1})
+		}
+		if t.IsDragon() {
+			matches = append(matches, Match{Name: "Yakuhai (" + dragonName(m.Base) + ")", Han: 1})
+		}
+	}
+	return matches
+}
+
+func detectIipeikou(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if d.Form != hand.FormStandard || h.Open {
+		return nil
+	}
+	sets := d.Sets()
+	for i := range sets {
+		for j := i + 1; j < len(sets); j++ {
+			if sets[i].Kind == hand.MeldSequence && sets[j].Kind == hand.MeldSequence &&
+				sets[i].Base == sets[j].Base {
+				return []Match{{Name: "Iipeikou", Han: 1}}
+			}
+		}
+	}
+	return nil
+}
+
+func detectToitoi(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if d.Form != hand.FormStandard {
+		return nil
+	}
+	for _, m := range d.Sets() {
+		if m.Kind != hand.MeldTriplet {
+			return nil
+		}
+	}
+	return []Match{{Name: "Toitoi", Han: 2}}
+}
+
+func detectHonitsu(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if d.Form == hand.FormKokushi {
+		return nil
+	}
+	var suit tile.Suit
+	suitSet := false
+	hasHonor := false
+	for _, t := range h.Concealed {
+		if t.IsHonor() {
+			hasHonor = true
+			continue
+		}
+		if !suitSet {
+			suit = t.Suit()
+			suitSet = true
+		} else if t.Suit() != suit {
+			return nil
+		}
+	}
+	if !suitSet || !hasHonor {
+		return nil
+	}
+	han := 3
+	if h.Open {
+		han = 2
+	}
+	return []Match{{Name: "Honitsu", Han: han}}
+}
+
+func detectSanshokuDoujun(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if d.Form != hand.FormStandard {
+		return nil
+	}
+	for rank := uint8(1); rank <= 7; rank++ {
+		hasMan := false
+		hasPin := false
+		hasSou := false
+		for _, m := range d.Sets() {
+			if m.Kind != hand.MeldSequence {
+				continue
+			}
+			switch m.Base {
+			case tile.M1 + rank - 1:
+				hasMan = true
+			case tile.P1 + rank - 1:
+				hasPin = true
+			case tile.S1 + rank - 1:
+				hasSou = true
+			}
+		}
+		if hasMan && hasPin && hasSou {
+			han := 2
+			if h.Open {
+				han = 1
+			}
+			return []Match{{Name: "Sanshoku doujun", Han: han}}
+		}
+	}
+	return nil
+}
+
+func detectIttsuu(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if d.Form != hand.FormStandard {
+		return nil
+	}
+	for _, base := range []uint8{tile.M1, tile.P1, tile.S1} {
+		has123, has456, has789 := false, false, false
+		for _, m := range d.Sets() {
+			if m.Kind != hand.MeldSequence {
+				continue
+			}
+			switch m.Base {
+			case base:
+				has123 = true
+			case base + 3:
+				has456 = true
+			case base + 6:
+				has789 = true
+			}
+		}
+		if has123 && has456 && has789 {
+			han := 2
+			if h.Open {
+				han = 1
+			}
+			return []Match{{Name: "Ittsuu", Han: han}}
+		}
+	}
+	return nil
+}
+
+func isYakuhaiTile(id uint8, ctx Context) bool {
+	t := tile.Tile{ID: id}
+	if t.IsDragon() {
+		return true
+	}
+	if t.IsWind() && (id == ctx.SeatWind || id == ctx.RoundWind) {
+		return true
+	}
+	return false
+}
+
+func dragonName(id uint8) string {
+	switch id {
+	case tile.Haku:
+		return "Haku"
+	case tile.Hatsu:
+		return "Hatsu"
+	case tile.Chun:
+		return "Chun"
+	}
+	return "?"
+}
+
+// ryanmenPossible reports whether at least one sequence in the decomposition
+// can be interpreted as the winning sequence with a ryanmen completion (the
+// winning tile is at one end of the sequence and the opposite end isn't
+// against the suit's edge — a 7-8-9 with winning=7 or a 1-2-3 with winning=3
+// is penchan, never ryanmen; a sequence with winning at the middle is
+// kanchan).
+func ryanmenPossible(d hand.Decomposition, winning tile.Tile) bool {
+	for _, m := range d.Sets() {
+		if m.Kind != hand.MeldSequence {
+			continue
+		}
+		if !m.Contains(winning.ID) {
+			continue
+		}
+		baseRank := tile.Tile{ID: m.Base}.Rank()
+		pos := winning.ID - m.Base
+		switch pos {
+		case 0:
+			if baseRank != 7 {
+				return true
+			}
+		case 1:
+			// kanchan
+		case 2:
+			if baseRank != 1 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// --- Group A: composition-based detectors (chinitsu, honroutou, chanta, junchan).
+
+func detectChinitsu(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if d.Form == hand.FormKokushi {
+		return nil
+	}
+	var suit tile.Suit
+	suitSet := false
+	for _, t := range h.Concealed {
+		if t.IsHonor() {
+			return nil
+		}
+		if !suitSet {
+			suit = t.Suit()
+			suitSet = true
+			continue
+		}
+		if t.Suit() != suit {
+			return nil
+		}
+	}
+	if !suitSet {
+		return nil
+	}
+	han := 6
+	if h.Open {
+		han = 5
+	}
+	return []Match{{Name: "Chinitsu", Han: han}}
+}
+
+func detectHonroutou(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if d.Form == hand.FormKokushi {
+		return nil
+	}
+	for _, t := range h.Concealed {
+		if !t.IsTerminalOrHonor() {
+			return nil
+		}
+	}
+	return []Match{{Name: "Honroutou", Han: 2}}
+}
+
+func detectChanta(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if d.Form == hand.FormKokushi {
+		return nil
+	}
+	if !handContainsHonor(h) {
+		return nil
+	}
+	if !everyMeldHasYaochuhai(d) {
+		return nil
+	}
+	if d.Form == hand.FormChiitoitsu {
+		return []Match{{Name: "Chanta", Han: 2}}
+	}
+	han := 2
+	if h.Open {
+		han = 1
+	}
+	return []Match{{Name: "Chanta", Han: han}}
+}
+
+func detectJunchan(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if d.Form == hand.FormKokushi {
+		return nil
+	}
+	if handContainsHonor(h) {
+		return nil
+	}
+	if !everyMeldHasTerminal(d) {
+		return nil
+	}
+	if d.Form == hand.FormChiitoitsu {
+		return []Match{{Name: "Junchan", Han: 3}}
+	}
+	han := 3
+	if h.Open {
+		han = 2
+	}
+	return []Match{{Name: "Junchan", Han: han}}
+}
+
+// --- Group A: meld-shape detectors (sanankou, sanshoku doukou, shousangen, ryanpeikou).
+
+func detectSanankou(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if d.Form != hand.FormStandard {
+		return nil
+	}
+	concealedTriplets := 0
+	for _, m := range d.Sets() {
+		if m.Kind != hand.MeldTriplet {
+			continue
+		}
+		if h.Open {
+			continue
+		}
+		// Ron on a shanpon completion: the winning tile is in this triplet AND
+		// the win was ron (not tsumo). That triplet is treated as open for
+		// sanankou-counting purposes.
+		if !h.IsTsumo && m.Base == h.Winning.ID {
+			continue
+		}
+		concealedTriplets++
+	}
+	if concealedTriplets < 3 {
+		return nil
+	}
+	return []Match{{Name: "Sanankou", Han: 2}}
+}
+
+func detectSanshokuDoukou(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if d.Form != hand.FormStandard {
+		return nil
+	}
+	for rank := uint8(1); rank <= 9; rank++ {
+		hasMan := false
+		hasPin := false
+		hasSou := false
+		for _, m := range d.Sets() {
+			if m.Kind != hand.MeldTriplet {
+				continue
+			}
+			switch m.Base {
+			case tile.M1 + rank - 1:
+				hasMan = true
+			case tile.P1 + rank - 1:
+				hasPin = true
+			case tile.S1 + rank - 1:
+				hasSou = true
+			}
+		}
+		if hasMan && hasPin && hasSou {
+			return []Match{{Name: "Sanshoku doukou", Han: 2}}
+		}
+	}
+	return nil
+}
+
+func detectShousangen(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if d.Form != hand.FormStandard {
+		return nil
+	}
+	pairBase := d.Pair().Base
+	if !(tile.Tile{ID: pairBase}).IsDragon() {
+		return nil
+	}
+	dragonTriplets := 0
+	for _, m := range d.Sets() {
+		if m.Kind == hand.MeldTriplet && (tile.Tile{ID: m.Base}).IsDragon() {
+			dragonTriplets++
+		}
+	}
+	if dragonTriplets != 2 {
+		return nil
+	}
+	return []Match{{Name: "Shousangen", Han: 2}}
+}
+
+func detectRyanpeikou(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if d.Form != hand.FormStandard || h.Open {
+		return nil
+	}
+	sets := d.Sets()
+	for _, m := range sets {
+		if m.Kind != hand.MeldSequence {
+			return nil
+		}
+	}
+	// Count sequence-base occurrences. Ryanpeikou requires exactly two distinct
+	// bases each appearing twice (two iipeikou shapes).
+	counts := map[uint8]int{}
+	for _, m := range sets {
+		counts[m.Base]++
+	}
+	if len(counts) != 2 {
+		return nil
+	}
+	for _, c := range counts {
+		if c != 2 {
+			return nil
+		}
+	}
+	return []Match{{Name: "Ryanpeikou", Han: 3}}
+}
+
+// --- Shared helpers for Group A.
+
+func handContainsHonor(h hand.Hand) bool {
+	for _, t := range h.Concealed {
+		if t.IsHonor() {
+			return true
+		}
+	}
+	return false
+}
+
+func everyMeldHasYaochuhai(d hand.Decomposition) bool {
+	for _, m := range d.Melds {
+		if !meldHasYaochuhai(m) {
+			return false
+		}
+	}
+	return true
+}
+
+func everyMeldHasTerminal(d hand.Decomposition) bool {
+	for _, m := range d.Melds {
+		if !meldHasTerminal(m) {
+			return false
+		}
+	}
+	return true
+}
+
+func meldHasYaochuhai(m hand.Meld) bool {
+	return slices.ContainsFunc(m.Tiles(), hand.IsYaochuhai)
+}
+
+func meldHasTerminal(m hand.Meld) bool {
+	for _, id := range m.Tiles() {
+		if (tile.Tile{ID: id}).IsTerminal() {
+			return true
+		}
+	}
+	return false
+}
+
+// --- Group C: situational / turn-aware detectors. The game loop populates
+// the corresponding bool flag on Context; the detectors are one-line
+// flag reads plus the obvious gating (concealment, win type, dealer).
+
+func detectIppatsu(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if !ctx.Ippatsu || h.Open {
+		return nil
+	}
+	return []Match{{Name: "Ippatsu", Han: 1}}
+}
+
+func detectDoubleRiichi(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if !ctx.DoubleRiichi || h.Open {
+		return nil
+	}
+	return []Match{{Name: "Double riichi", Han: 2}}
+}
+
+func detectHaitei(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if !ctx.Haitei || !h.IsTsumo {
+		return nil
+	}
+	return []Match{{Name: "Haitei raoyue", Han: 1}}
+}
+
+func detectHoutei(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if !ctx.Houtei || h.IsTsumo {
+		return nil
+	}
+	return []Match{{Name: "Houtei raoyui", Han: 1}}
+}
+
+func detectRinshan(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if !ctx.Rinshan || !h.IsTsumo {
+		return nil
+	}
+	return []Match{{Name: "Rinshan kaihou", Han: 1}}
+}
+
+func detectChankan(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if !ctx.Chankan || h.IsTsumo {
+		return nil
+	}
+	return []Match{{Name: "Chankan", Han: 1}}
+}
+
+func detectTenhou(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if !ctx.Tenhou || h.Open || !h.IsTsumo {
+		return nil
+	}
+	if ctx.SeatWind != tile.EastWind {
+		return nil
+	}
+	return []Match{{Name: "Tenhou", Han: 13, IsYakuman: true}}
+}
+
+func detectChiihou(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if !ctx.Chiihou || h.Open || !h.IsTsumo {
+		return nil
+	}
+	if ctx.SeatWind == tile.EastWind {
+		return nil
+	}
+	return []Match{{Name: "Chiihou", Han: 13, IsYakuman: true}}
+}

@@ -1,0 +1,9 @@
+.spectra/
+openspec/.vector-search.db*
+
+# Build artifacts
+/bin/
+*.test
+
+# OS / editor cruft
+.DS_Store
