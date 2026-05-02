@@ -136,6 +136,78 @@ func TestBotRonRejectedWhenFuriten(t *testing.T) {
 	}
 }
 
+// northTenpaiOn5p returns a 13-tile hand whose machi includes 5p (kanchan
+// wait on 4p+6p). Used to plant a tenpai seat that wins on a passable 5p
+// discard from another seat.
+func northTenpaiOn5p() []tile.Tile {
+	return []tile.Tile{
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.M4},
+		{ID: tile.S2},
+		{ID: tile.S3},
+		{ID: tile.S4},
+		{ID: tile.S6},
+		{ID: tile.S7},
+		{ID: tile.S8},
+		{ID: tile.P4},
+		{ID: tile.P6},
+		{ID: tile.P9},
+		{ID: tile.P9},
+	}
+}
+
+func TestTempFuritenArmsOnPassedWin(t *testing.T) {
+	g := New(7)
+	g.testSetHand(SeatNorth, northTenpaiOn5p())
+	g.testSetState(StateAwaitingClaims{
+		Discard:   tile.Tile{ID: tile.P5},
+		Discarder: SeatEast,
+	})
+
+	if _, err := g.Step(InputResolveClaims{Claims: nil}); err != nil {
+		t.Fatalf("Step(pass) returned err: %v", err)
+	}
+
+	if !g.IsFuriten(SeatNorth) {
+		t.Errorf(
+			"IsFuriten(North) = false after passing on machi tile, want true (temp furiten armed)",
+		)
+	}
+	if !g.tempFuriten[SeatNorth] {
+		t.Errorf("tempFuriten[North] = false after passing on machi tile, want true")
+	}
+}
+
+func TestTempFuritenClearsOnNextOwnDraw(t *testing.T) {
+	g := New(7)
+	g.testSetHand(SeatNorth, northTenpaiOn5p())
+	g.testSetState(StateAwaitingClaims{
+		Discard:   tile.Tile{ID: tile.P5},
+		Discarder: SeatEast,
+	})
+	if _, err := g.Step(InputResolveClaims{Claims: nil}); err != nil {
+		t.Fatalf("Step(pass) returned err: %v", err)
+	}
+	if !g.tempFuriten[SeatNorth] {
+		t.Fatalf("precondition: tempFuriten[North] should be armed after passing")
+	}
+
+	// Drive directly to North's draw via testSetState (the multi-step trace
+	// through South/West discards would also work, but it's noise here —
+	// what we're testing is the AwaitingDraw side effect, not the cycle).
+	g.testSetState(StateAwaitingDraw{Player: SeatNorth})
+	if _, err := g.Step(InputDraw{}); err != nil {
+		t.Fatalf("Step(InputDraw) for North returned err: %v", err)
+	}
+
+	if g.tempFuriten[SeatNorth] {
+		t.Errorf(
+			"tempFuriten[North] = true after own draw, want false (cleared by stepFromAwaitingDraw)",
+		)
+	}
+}
+
 func TestHumanRonRejectedWhenFuriten(t *testing.T) {
 	g := New(7)
 	g.testSetHand(HumanSeat, []tile.Tile{
