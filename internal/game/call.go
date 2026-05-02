@@ -30,8 +30,17 @@ func ResolveClaims(claims map[Seat]Claim, discarder Seat) (Seat, ClaimKind, bool
 		return bestRon, ClaimRon, true
 	}
 
+	// Kan wins over pon when both fire on the same discard. Iterate kan
+	// first, then pon, so map-iteration nondeterminism doesn't pick the
+	// wrong winner.
 	for seat, c := range claims {
-		if c.Kind == ClaimPon || c.Kind == ClaimKan {
+		if c.Kind == ClaimKan {
+			return seat, c.Kind, true
+		}
+	}
+
+	for seat, c := range claims {
+		if c.Kind == ClaimPon {
 			return seat, c.Kind, true
 		}
 	}
@@ -43,6 +52,18 @@ func ResolveClaims(claims map[Seat]Claim, discarder Seat) (Seat, ClaimKind, bool
 	}
 
 	return 0, ClaimPass, false
+}
+
+// CanKan reports whether a player holding `hand` can legally minkan the
+// given `discarded` tile — they must hold exactly 3 matching tiles by ID.
+func CanKan(hand []tile.Tile, discarded tile.Tile) bool {
+	count := 0
+	for _, t := range hand {
+		if t.ID == discarded.ID {
+			count++
+		}
+	}
+	return count == 3
 }
 
 // CanPon reports whether a player holding `hand` can legally pon the given

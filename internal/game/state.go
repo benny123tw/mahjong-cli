@@ -64,9 +64,18 @@ type StateRoundOver struct{ Outcome Outcome }
 // in v1, so this is reached only when the (single) round completes.
 type StateGameOver struct{}
 
+// StateAwaitingChankan — Declarer has just submitted shouminkan; the
+// engine pauses to allow other seats one ron claim on UpgradeTile before
+// the kan completes. Only InputResolveClaims (ron-only) is honored.
+type StateAwaitingChankan struct {
+	UpgradeTile tile.Tile
+	Declarer    Seat
+}
+
 func (StateAwaitingDraw) isState()    {}
 func (StateAwaitingDiscard) isState() {}
 func (StateAwaitingClaims) isState()  {}
+func (StateAwaitingChankan) isState() {}
 func (StateRoundOver) isState()       {}
 func (StateGameOver) isState()        {}
 
@@ -133,10 +142,31 @@ type InputResolveClaims struct {
 	Claims map[Seat]Claim
 }
 
-func (InputDraw) isInput()          {}
-func (InputDiscard) isInput()       {}
-func (InputDeclareTsumo) isInput()  {}
-func (InputResolveClaims) isInput() {}
+// InputDeclareAnkan — only valid in StateAwaitingDiscard. Declares a
+// concealed kan when the active seat's hand contains exactly 4 tiles
+// matching `TileID`. On success, the four tiles become a MeldKan with
+// KanKind=KanAnkan, the engine reveals an additional dora indicator,
+// pulls a rinshan replacement tile, and stays in AwaitingDiscard.
+type InputDeclareAnkan struct {
+	TileID uint8
+}
+
+// InputDeclareShouminkan — only valid in StateAwaitingDiscard. Upgrades
+// an existing open MeldPon (matching `TileID`) by appending the 4th tile
+// from the active seat's concealed hand. The engine transitions to
+// StateAwaitingChankan to give other seats a ron window before the kan
+// completes; on no ron, the pon is upgraded to KanShouminkan and the
+// rinshan flow runs.
+type InputDeclareShouminkan struct {
+	TileID uint8
+}
+
+func (InputDraw) isInput()              {}
+func (InputDiscard) isInput()           {}
+func (InputDeclareTsumo) isInput()      {}
+func (InputResolveClaims) isInput()     {}
+func (InputDeclareAnkan) isInput()      {}
+func (InputDeclareShouminkan) isInput() {}
 
 // ClaimKind enumerates the claim types resolvable on a discard. Pass is
 // included as a no-op to make the resolver's input shape symmetric.

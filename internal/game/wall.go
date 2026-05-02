@@ -29,16 +29,49 @@ type Wall struct {
 	tiles     []tile.Tile
 	drawIndex int
 	rng       *rand.Rand
+
+	// kansDrawn counts the number of rinshan replacement tiles consumed
+	// (max 4 per round per riichi rules).
+	kansDrawn int
+
+	// kanDoraRevealed counts how many kan-dora indicators have been
+	// surfaced (max 4 — one per kan).
+	kanDoraRevealed int
 }
 
-// NewWall builds a 136-tile wall (4 of each of 34 tile types, no red fives in
-// v1) and shuffles it using a PCG PRNG seeded from `seed`. Two walls
-// constructed with the same seed produce byte-identical tile orders.
+// WallOptions configures wall construction. Akadora (default in NewWall)
+// substitutes one of the four copies of each five-rank tile with the red
+// variant before the shuffle, so per-seed reproducibility is preserved.
+type WallOptions struct {
+	Akadora bool
+}
+
+// NewWall builds a 136-tile wall (4 of each of 34 tile types) with akadora
+// enabled — one of each five (5m, 5p, 5s) is the red variant. It delegates to
+// NewWallWithOptions; callers needing akadora-off should use that directly.
 func NewWall(seed int64) *Wall {
+	return NewWallWithOptions(seed, WallOptions{Akadora: true})
+}
+
+// NewWallWithOptions builds a 136-tile wall and shuffles it using a PCG PRNG
+// seeded from `seed`. When opts.Akadora is true, the first encountered copy
+// of each five-rank tile is flipped to Red BEFORE the shuffle so two calls
+// with the same seed produce byte-identical orders (red fives included).
+func NewWallWithOptions(seed int64, opts WallOptions) *Wall {
 	tiles := make([]tile.Tile, 0, 34*4)
 	for id := range uint8(tile.TileCount) {
 		for range 4 {
 			tiles = append(tiles, tile.Tile{ID: id})
+		}
+	}
+	if opts.Akadora {
+		for _, fiveID := range []uint8{tile.M5, tile.P5, tile.S5} {
+			for i := range tiles {
+				if tiles[i].ID == fiveID && !tiles[i].Red {
+					tiles[i].Red = true
+					break
+				}
+			}
 		}
 	}
 	r := rand.New(rand.NewPCG(uint64(seed), uint64(seed)^0x9E3779B97F4A7C15))
@@ -101,4 +134,39 @@ func (w *Wall) Draw() (tile.Tile, bool) {
 func (w *Wall) LiveRemaining() int {
 	live := len(w.tiles) - deadWallSize
 	return live - w.drawIndex
+}
+
+// maxKansPerRound is the standard riichi cap on kan declarations per hand.
+const maxKansPerRound = 4
+
+// RinshanDraw pulls a replacement tile from the dead wall after a kan
+// declaration. The tile is taken from a fixed slot reserved for rinshan
+// (does not consume from the live wall — `LiveRemaining()` is unchanged).
+// Returns ok=false when 4 kans have already been drawn this round (max
+// per riichi rules).
+//
+// Layout: rinshan slot k (0-indexed) sits at `tiles[len-2-2*k]`. Slot 0
+// is one position to the left of the initial dora indicator (`tiles[len-1]`).
+func (w *Wall) RinshanDraw() (tile.Tile, bool) {
+	if w.kansDrawn >= maxKansPerRound {
+		return tile.Tile{}, false
+	}
+	idx := len(w.tiles) - 2 - 2*w.kansDrawn
+	t := w.tiles[idx]
+	w.kansDrawn++
+	return t, true
+}
+
+// RevealKanDora exposes the next kan-dora indicator from the dead wall.
+// Called by Game.afterKan after a successful rinshan draw. The indicator
+// is appended to the game's `doraIndicators` list and counted toward dora
+// han at win time.
+//
+// Layout: kan-dora slot k (0-indexed) sits at `tiles[len-3-2*k]`, two
+// positions to the left of the corresponding rinshan slot.
+func (w *Wall) RevealKanDora() tile.Tile {
+	idx := len(w.tiles) - 3 - 2*w.kanDoraRevealed
+	t := w.tiles[idx]
+	w.kanDoraRevealed++
+	return t
 }
