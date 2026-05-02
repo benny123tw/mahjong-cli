@@ -104,6 +104,38 @@ func TestHumanRonOnYakuBearingDiscard(t *testing.T) {
 	}
 }
 
+func TestBotRonRejectedWhenFuriten(t *testing.T) {
+	g := New(7)
+	g.testSetHand(SeatNorth, []tile.Tile{
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.M4},
+		{ID: tile.P2},
+		{ID: tile.P3},
+		{ID: tile.P4},
+		{ID: tile.S2},
+		{ID: tile.S3},
+		{ID: tile.S4},
+		{ID: tile.M4},
+		{ID: tile.M4},
+		{ID: tile.S5},
+		{ID: tile.S6},
+	})
+	// Plant the machi 7s in North's own pond → permanent furiten.
+	g.discards[SeatNorth] = append(g.discards[SeatNorth], tile.Tile{ID: tile.S7})
+	g.testSetState(StateAwaitingClaims{Discard: tile.Tile{ID: tile.S7}, Discarder: SeatEast})
+
+	_, err := g.Step(InputResolveClaims{Claims: map[Seat]Claim{
+		SeatNorth: {Kind: ClaimRon},
+	}})
+	if !errors.Is(err, ErrFuritenRon) {
+		t.Errorf("bot furiten ron returned err=%v, want ErrFuritenRon", err)
+	}
+	if _, ok := g.state.(StateAwaitingClaims); !ok {
+		t.Errorf("state after bot furiten ron = %T, want StateAwaitingClaims unchanged", g.state)
+	}
+}
+
 func TestHumanRonRejectedWhenFuriten(t *testing.T) {
 	g := New(7)
 	g.testSetHand(HumanSeat, []tile.Tile{

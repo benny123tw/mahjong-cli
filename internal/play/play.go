@@ -223,19 +223,114 @@ func (m Model) handleBotTick() (tea.Model, tea.Cmd) {
 	switch s := m.game.State().(type) {
 	case game.StateAwaitingDraw:
 		_, _ = m.game.Step(game.InputDraw{})
-		_ = s
 	case game.StateAwaitingDiscard:
-		bot := game.Bot{Seat: s.Player, Rng: m.game.Wall().Rand()}
-		idx := max(bot.PickDiscard(m.game.Hand(s.Player)), 0)
-		_, _ = m.game.Step(game.InputDiscard{Index: idx})
+		m.dispatchBotDiscard(s.Player)
 	case game.StateAwaitingClaims:
-		// V1: bots auto-pass. The bot decision logic exists in game.Bot but
-		// piping it through here (one decision per non-discarder seat) plus
-		// the resolver is its own task; deferred to add-smart-ai.
-		_, _ = m.game.Step(game.InputResolveClaims{Claims: nil})
+		m.dispatchBotClaims(s)
 	}
 	m = m.autoDrawHuman()
 	return m, m.maybeBotTickCmd()
+}
+
+// dispatchBotDiscard runs the bot's discard-phase decisions in priority
+// order: tsumo if the 14-tile hand wins, riichi if tenpai-after-discard,
+// otherwise the isolation-heuristic discard. The order matches the spec'd
+// Bot Decision Strategy: Tsumo > Riichi > regular discard.
+func (m Model) dispatchBotDiscard(seat game.Seat) {
+	hd := m.game.Hand(seat)
+	// Tsumo check: build a 14-tile winning Hand and run calc.Analyze. The
+	// engine's InputDeclareTsumo also re-validates, so this is just a
+	// pre-flight to know whether to declare or fall through.
+	if len(hd) == 14 {
+		drawn := hd[len(hd)-1]
+		ctx := m.botContextForWin(seat)
+		if calc.Analyze(hand.Hand{
+			Concealed: hd,
+			Winning:   drawn,
+			IsTsumo:   true,
+			Open:      m.game.IsHandOpen(seat),
+		}, ctx) != nil {
+			if _, err := m.game.Step(game.InputDeclareTsumo{}); err == nil {
+				return
+			}
+			// Fall through if engine rejected (e.g., yakuless edge case).
+		}
+	}
+
+	bot := game.Bot{Seat: seat, Rng: m.game.Wall().Rand()}
+	// Riichi check: ShouldRiichi returns the first tenpai-leaving index.
+	if declare, idx := bot.ShouldRiichi(
+		hd,
+		m.game.Score(seat),
+		m.game.Wall().LiveRemaining(),
+		m.game.IsHandOpen(seat),
+	); declare {
+		_, _ = m.game.Step(game.InputDiscard{Index: idx, Riichi: true})
+		return
+	}
+
+	idx := max(bot.PickDiscard(hd), 0)
+	_, _ = m.game.Step(game.InputDiscard{Index: idx})
+}
+
+// dispatchBotClaims iterates non-discarder bot seats and collects each
+// bot's claim (ron > pon > chi) into a single InputResolveClaims call.
+// The human's claim is NOT auto-submitted here — they drive their own
+// keypress (R/P/C/Space). The engine's ResolveClaims enforces priority
+// across all collected claims.
+func (m Model) dispatchBotClaims(cs game.StateAwaitingClaims) {
+	claims := map[game.Seat]game.Claim{}
+	for _, seat := range []game.Seat{game.SeatEast, game.SeatSouth, game.SeatWest, game.SeatNorth} {
+		if seat == cs.Discarder || seat == HumanSeat {
+			continue
+		}
+		hd := m.game.Hand(seat)
+		bot := game.Bot{Seat: seat, Rng: m.game.Wall().Rand()}
+
+		// Ron: calc.Analyze on concealed+discard non-nil AND not furiten.
+		concealed := append([]tile.Tile{}, hd...)
+		concealed = append(concealed, cs.Discard)
+		if calc.Analyze(hand.Hand{
+			Concealed: concealed,
+			Winning:   cs.Discard,
+			IsTsumo:   false,
+			Open:      m.game.IsHandOpen(seat),
+		}, m.botContextForWin(seat)) != nil && !m.game.IsFuriten(seat) {
+			claims[seat] = game.Claim{Kind: game.ClaimRon}
+			continue
+		}
+
+		// Pon: ShouldPon checks CanPon internally; we feed it the yakuhai
+		// flag and the bot's current shanten.
+		isYakuhai := game.IsYakuhai(cs.Discard.ID, m.game.RoundWind(), seat.SeatWind())
+		shanten := hand.Shanten(hand.Hand{Concealed: hd})
+		if bot.ShouldPon(hd, cs.Discard, isYakuhai, shanten) {
+			claims[seat] = game.Claim{Kind: game.ClaimPon}
+			continue
+		}
+
+		// Chi: kamicha-only. ShouldChi enforces the kamicha rule via
+		// CanChi internally, but checking here keeps the iteration cheap.
+		if seat == cs.Discarder.Next() {
+			if option, ok := bot.ShouldChi(hd, cs.Discard, cs.Discarder); ok {
+				claims[seat] = game.Claim{Kind: game.ClaimChi, ChiTiles: option}
+				continue
+			}
+		}
+	}
+	_, _ = m.game.Step(game.InputResolveClaims{Claims: claims})
+}
+
+// botContextForWin builds a calc.Context for a bot win evaluation. Mirrors
+// Game.contextForWin but for a non-human seat without exposing the engine's
+// full per-seat riichi state — tsumo/ron pre-flights only need the basic
+// scoring context (calc.Analyze rejects yakuless wins regardless).
+func (m Model) botContextForWin(seat game.Seat) calc.Context {
+	return calc.Context{
+		SeatWind:  seat.SeatWind(),
+		RoundWind: m.game.RoundWind(),
+		Dora:      m.game.DoraIndicators(),
+	}
 }
 
 func (m Model) handleKey(key string) (tea.Model, tea.Cmd) {

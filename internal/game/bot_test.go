@@ -138,16 +138,97 @@ func TestBotShouldChiFromKamichaIsProbabilistic(t *testing.T) {
 	}
 }
 
-func TestBotShouldRiichiAlwaysFalseInV1(t *testing.T) {
-	b := newDeterministicBot(SeatSouth, 1)
-	if b.ShouldRiichi() {
-		t.Errorf("ShouldRiichi = true, want false (riichi deferred to add-smart-ai)")
-	}
-}
-
 func TestBotShouldKanAlwaysFalseInV1(t *testing.T) {
 	b := newDeterministicBot(SeatSouth, 1)
 	if b.ShouldKan() {
 		t.Errorf("ShouldKan = true, want false (kan deferred to add-kan-support)")
+	}
+}
+
+func TestBotShouldRiichiLegalOnTenpaiHand(t *testing.T) {
+	// 14-tile hand: discarding M5 (index 13) leaves the canonical
+	// tenpai shape from tenpaiHandReady() (machi: 4s, 7s).
+	hand := append([]tile.Tile(nil), tenpaiHandReady()...)
+	hand = append(hand, tile.Tile{ID: tile.M5})
+
+	b := newDeterministicBot(SeatEast, 1)
+	declare, idx := b.ShouldRiichi(hand, 25000, 60, false)
+	if !declare {
+		t.Errorf("ShouldRiichi on tenpai hand returned declare=false, want true")
+	}
+	if idx < 0 || idx >= len(hand) {
+		t.Errorf("ShouldRiichi returned idx=%d, want 0..%d", idx, len(hand)-1)
+	}
+	// The first tenpai-leaving index is the M5 we appended (index 13)
+	// because the underlying 13 tiles form a sorted tenpai shape — removing
+	// any of them disrupts the wait.
+	if idx != 13 {
+		t.Errorf("ShouldRiichi returned idx=%d, want 13 (the appended M5)", idx)
+	}
+}
+
+func TestBotShouldRiichiRejectedWhenNotTenpai(t *testing.T) {
+	hand := []tile.Tile{
+		{ID: tile.M1},
+		{ID: tile.M3},
+		{ID: tile.M5},
+		{ID: tile.M7},
+		{ID: tile.M9},
+		{ID: tile.P1},
+		{ID: tile.P3},
+		{ID: tile.P5},
+		{ID: tile.P7},
+		{ID: tile.P9},
+		{ID: tile.S1},
+		{ID: tile.S3},
+		{ID: tile.S5},
+		{ID: tile.S7},
+	}
+	b := newDeterministicBot(SeatEast, 1)
+	declare, _ := b.ShouldRiichi(hand, 25000, 60, false)
+	if declare {
+		t.Errorf("ShouldRiichi on non-tenpai hand returned declare=true, want false")
+	}
+}
+
+func TestBotShouldRiichiRejectedWhenOpen(t *testing.T) {
+	hand := append([]tile.Tile(nil), tenpaiHandReady()...)
+	hand = append(hand, tile.Tile{ID: tile.M5})
+
+	b := newDeterministicBot(SeatEast, 1)
+	declare, _ := b.ShouldRiichi(hand, 25000, 60, true)
+	if declare {
+		t.Errorf("ShouldRiichi on open hand returned declare=true, want false")
+	}
+}
+
+func TestBotShouldRiichiRejectedWhenScoreTooLow(t *testing.T) {
+	hand := append([]tile.Tile(nil), tenpaiHandReady()...)
+	hand = append(hand, tile.Tile{ID: tile.M5})
+
+	b := newDeterministicBot(SeatEast, 1)
+	declare, _ := b.ShouldRiichi(hand, 800, 60, false)
+	if declare {
+		t.Errorf("ShouldRiichi with score=800 returned declare=true, want false")
+	}
+}
+
+func TestBotShouldRiichiRejectedWhenWallTooLow(t *testing.T) {
+	hand := append([]tile.Tile(nil), tenpaiHandReady()...)
+	hand = append(hand, tile.Tile{ID: tile.M5})
+
+	b := newDeterministicBot(SeatEast, 1)
+	declare, _ := b.ShouldRiichi(hand, 25000, 3, false)
+	if declare {
+		t.Errorf("ShouldRiichi with wall=3 returned declare=true, want false")
+	}
+}
+
+func TestBotShouldRiichiRejectedWhenHandSizeWrong(t *testing.T) {
+	hand := tenpaiHandReady() // 13 tiles, not 14
+	b := newDeterministicBot(SeatEast, 1)
+	declare, _ := b.ShouldRiichi(hand, 25000, 60, false)
+	if declare {
+		t.Errorf("ShouldRiichi on 13-tile hand returned declare=true, want false")
 	}
 }

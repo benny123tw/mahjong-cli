@@ -318,11 +318,12 @@ func (g *Game) stepFromAwaitingClaims(s StateAwaitingClaims, in Input) (Event, e
 	}
 	switch kind {
 	case ClaimRon:
-		// Furiten blocks the human ron: a winning shape with the seat's
-		// machi tile in its own pond is illegal. v1 only enforces this
-		// for the human (bots never ron). When bot ron lands, this gate
-		// applies to all seats.
-		if winner == HumanSeat && g.IsFuriten(winner) {
+		// Furiten blocks ron for any seat with the machi tile in their
+		// own pond. The gate applies universally — humans and bots
+		// follow the same permanent-furiten rule. (Temporary furiten
+		// across opponent discards is still out of scope; that needs
+		// per-seat machi-passed tracking.)
+		if g.IsFuriten(winner) {
 			return nil, ErrFuritenRon
 		}
 		concealed := append([]tile.Tile(nil), g.hands[winner]...)
@@ -598,6 +599,11 @@ func (g *Game) SetTestPond(s Seat, tiles []tile.Tile) {
 func (g *Game) IsHandOpen(s Seat) bool {
 	return g.testOpen[s] || len(g.melds[s]) > 0
 }
+
+// Score returns the seat's current point total. Initialized to 25000 in
+// New(). Mutated by riichi-deposit deductions and (in a future change) by
+// agari payouts and ryuukyoku noten payments.
+func (g *Game) Score(s Seat) int { return g.scores[s] }
 
 // IsFuriten reports whether the seat is in permanent furiten — any tile in
 // the seat's own pond matches a tile ID in the seat's current machi. Returns

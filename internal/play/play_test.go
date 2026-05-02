@@ -591,3 +591,171 @@ func TestCallFooterShowsFuritenSuffixWhenBlocked(t *testing.T) {
 		t.Errorf("footer = %q, want (furiten) suffix when permanent furiten blocks ron", footer)
 	}
 }
+
+// fourteenTileWinningHand returns a 14-tile hand that wins yakufully on
+// tsumo (tanyao + concealed): 234m 234p 234s 44m 5s6s7s.
+func fourteenTileWinningHand() []tile.Tile {
+	return []tile.Tile{
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.M4},
+		{ID: tile.P2},
+		{ID: tile.P3},
+		{ID: tile.P4},
+		{ID: tile.S2},
+		{ID: tile.S3},
+		{ID: tile.S4},
+		{ID: tile.M4},
+		{ID: tile.M4},
+		{ID: tile.S5},
+		{ID: tile.S6},
+		{ID: tile.S7},
+	}
+}
+
+func TestBotDispatchTsumoOnWinningHand(t *testing.T) {
+	g := game.New(7)
+	g.SetTestHand(game.SeatEast, fourteenTileWinningHand())
+	g.SetTestState(game.StateAwaitingDiscard{Player: game.SeatEast})
+
+	m := NewWithGame(UnicodeRenderer{}, g)
+	updated, _ := m.Update(BotTickMsg{})
+	mu := updated.(Model)
+
+	st, ok := mu.GameState().(game.StateRoundOver)
+	if !ok {
+		t.Fatalf(
+			"after BotTickMsg with bot at winning hand, state = %T, want StateRoundOver",
+			mu.GameState(),
+		)
+	}
+	if _, ok := st.Outcome.(game.OutcomeTsumo); !ok {
+		t.Errorf("outcome = %T, want OutcomeTsumo", st.Outcome)
+	}
+}
+
+func TestBotDispatchRiichiOnTenpaiHand(t *testing.T) {
+	g := game.New(7)
+	// Plant tenpai-after-discard for SeatEast.
+	tenpai := append([]tile.Tile(nil), tenpaiHand13Test()...)
+	tenpai = append(tenpai, tile.Tile{ID: tile.M5})
+	g.SetTestHand(game.SeatEast, tenpai)
+	g.SetTestState(game.StateAwaitingDiscard{Player: game.SeatEast})
+
+	m := NewWithGame(UnicodeRenderer{}, g)
+	updated, _ := m.Update(BotTickMsg{})
+	mu := updated.(Model)
+
+	cs, ok := mu.GameState().(game.StateAwaitingClaims)
+	if !ok {
+		t.Fatalf("state after bot riichi = %T, want StateAwaitingClaims", mu.GameState())
+	}
+	if cs.Discarder != game.SeatEast {
+		t.Errorf("claims discarder = %d, want SeatEast", cs.Discarder)
+	}
+}
+
+// tenpaiHand13Test mirrors riichi_test.go's tenpaiHandReady — duplicated here
+// because internal/play can't see internal/game's package-private fixtures.
+func tenpaiHand13Test() []tile.Tile {
+	return []tile.Tile{
+		{ID: tile.M1},
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.P1},
+		{ID: tile.P2},
+		{ID: tile.P3},
+		{ID: tile.S1},
+		{ID: tile.S2},
+		{ID: tile.S3},
+		{ID: tile.S5},
+		{ID: tile.S6},
+		{ID: tile.Haku},
+		{ID: tile.Haku},
+	}
+}
+
+func TestBotDispatchRonOnYakuBearingDiscard(t *testing.T) {
+	g := game.New(7)
+	g.SetTestHand(game.SeatNorth, ronReadyHand())
+	g.SetTestState(
+		game.StateAwaitingClaims{Discard: tile.Tile{ID: tile.S7}, Discarder: game.SeatEast},
+	)
+
+	m := NewWithGame(UnicodeRenderer{}, g)
+	updated, _ := m.Update(BotTickMsg{})
+	mu := updated.(Model)
+
+	st, ok := mu.GameState().(game.StateRoundOver)
+	if !ok {
+		t.Fatalf("state after bot ron = %T, want StateRoundOver", mu.GameState())
+	}
+	out, ok := st.Outcome.(game.OutcomeRon)
+	if !ok {
+		t.Fatalf("outcome = %T, want OutcomeRon", st.Outcome)
+	}
+	if out.Winner != game.SeatNorth {
+		t.Errorf("ron winner = %d, want SeatNorth", out.Winner)
+	}
+	if out.Loser != game.SeatEast {
+		t.Errorf("ron loser = %d, want SeatEast", out.Loser)
+	}
+}
+
+func TestBotDispatchPonOnYakuhaiDiscard(t *testing.T) {
+	g := game.New(7)
+	// Plant SeatNorth with two East-wind tiles for yakuhai pon.
+	g.SetTestHand(game.SeatNorth, []tile.Tile{
+		{ID: tile.EastWind},
+		{ID: tile.EastWind},
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.M4},
+		{ID: tile.P2},
+		{ID: tile.P3},
+		{ID: tile.P4},
+		{ID: tile.S2},
+		{ID: tile.S3},
+		{ID: tile.S4},
+		{ID: tile.M5},
+		{ID: tile.M6},
+	})
+	g.SetTestState(
+		game.StateAwaitingClaims{Discard: tile.Tile{ID: tile.EastWind}, Discarder: game.SeatEast},
+	)
+
+	m := NewWithGame(UnicodeRenderer{}, g)
+	updated, _ := m.Update(BotTickMsg{})
+	mu := updated.(Model)
+
+	st, ok := mu.GameState().(game.StateAwaitingDiscard)
+	if !ok {
+		t.Fatalf("state after bot pon = %T, want StateAwaitingDiscard", mu.GameState())
+	}
+	if st.Player != game.SeatNorth {
+		t.Errorf("post-pon active player = %d, want SeatNorth", st.Player)
+	}
+}
+
+func TestBotDispatchDoesNotSubmitForHuman(t *testing.T) {
+	g := game.New(7)
+	// Plant the human at a yaku-bearing winning shape on the East discard.
+	// The bot dispatcher MUST NOT auto-submit a ClaimRon for the human —
+	// only the human's keypress can declare their claim.
+	g.SetTestHand(game.SeatSouth, ronReadyHand())
+	g.SetTestState(
+		game.StateAwaitingClaims{Discard: tile.Tile{ID: tile.S7}, Discarder: game.SeatEast},
+	)
+
+	m := NewWithGame(UnicodeRenderer{}, g)
+	updated, _ := m.Update(BotTickMsg{})
+	mu := updated.(Model)
+
+	if st, ok := mu.GameState().(game.StateRoundOver); ok {
+		if out, isRon := st.Outcome.(game.OutcomeRon); isRon && out.Winner == game.SeatSouth {
+			t.Errorf(
+				"bot dispatcher auto-submitted ron for the human (winner=South); the human's claim must come from their own keypress",
+			)
+		}
+	}
+}

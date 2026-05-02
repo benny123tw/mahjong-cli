@@ -3,6 +3,7 @@ package game
 import (
 	"math/rand/v2"
 
+	"github.com/benny123tw/mahjong-cli/internal/riichi/hand"
 	"github.com/benny123tw/mahjong-cli/internal/riichi/tile"
 )
 
@@ -106,8 +107,45 @@ func (b *Bot) ShouldChi(hand []tile.Tile, discarded tile.Tile, discarder Seat) (
 	return options[0], true
 }
 
-// ShouldRiichi is always false in v1 (riichi deferred to add-smart-ai).
-func (b *Bot) ShouldRiichi() bool { return false }
+// ShouldRiichi decides whether the bot declares riichi on the active turn.
+// Returns (declare, tileIdx). Preconditions: hand size 14, score ≥ 1000,
+// wall remaining ≥ 4, hand concealed (not open). When all hold, scans the
+// 14-tile hand and returns the first index whose post-discard 13-tile
+// hand is tenpai (shanten=0). Otherwise returns (false, 0).
+//
+// Tile-choice is deliberately deterministic — no PRNG consumption — so
+// existing golden-game replays stay byte-identical.
+func (b *Bot) ShouldRiichi(
+	tiles []tile.Tile,
+	score int,
+	wallRemaining int,
+	isOpen bool,
+) (declare bool, tileIdx int) {
+	if len(tiles) != 14 || score < 1000 || wallRemaining < 4 || isOpen {
+		return false, 0
+	}
+	postDiscard := make([]tile.Tile, 13)
+	for idx := range tiles {
+		postDiscard = postDiscard[:0]
+		postDiscard = append(postDiscard, tiles[:idx]...)
+		postDiscard = append(postDiscard, tiles[idx+1:]...)
+		if hand.Shanten(hand.Hand{Concealed: postDiscard}) == 0 {
+			return true, idx
+		}
+	}
+	return false, 0
+}
 
 // ShouldKan is always false in v1 (kan deferred to add-kan-support).
 func (b *Bot) ShouldKan() bool { return false }
+
+// IsYakuhai reports whether the given tile ID is a yakuhai tile for a seat
+// in the given round and seat wind: any dragon (Haku, Hatsu, Chun), the
+// round wind, or the seat wind.
+func IsYakuhai(id, roundWind, seatWind uint8) bool {
+	switch id {
+	case tile.Haku, tile.Hatsu, tile.Chun:
+		return true
+	}
+	return id == roundWind || id == seatWind
+}
