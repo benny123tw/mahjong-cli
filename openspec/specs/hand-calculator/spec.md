@@ -105,11 +105,19 @@ The system SHALL detect the following yaku and report the han value of each, sum
 | Yaku               | Han (concealed) | Han (open) | Conditions summary                                              |
 | ------------------ | --------------- | ---------- | --------------------------------------------------------------- |
 | Riichi             | 1               | n/a        | Player declared riichi; concealed only                          |
+| Double riichi      | 2               | n/a        | Riichi declared on the player's first uninterrupted draw; concealed only; supersedes regular riichi |
+| Ippatsu            | 1               | n/a        | Win on the player's next draw or any discard within the same go-around after declaring riichi, with no calls intervening; concealed only |
 | Menzen tsumo       | 1               | n/a        | Win by tsumo with no called melds                               |
 | Pinfu              | 1               | n/a        | All sequences, ryanmen wait, non-yakuhai pair, concealed        |
 | Tanyao             | 1               | 1          | No terminals (1, 9) or honors                                   |
 | Yakuhai            | 1 each          | 1 each     | Triplet/kan of round wind, seat wind, or any dragon             |
 | Iipeikou           | 1               | n/a        | Two identical sequences in same suit, concealed only            |
+| Haitei (raoyue)    | 1               | 1          | Win by tsumo on the very last drawn tile of the live wall       |
+| Houtei (raoyui)    | 1               | 1          | Win by ron on the very last discard of the round                |
+| Rinshan kaihou     | 1               | 1          | Win by tsumo on a tile drawn from the dead wall after declaring kan; SHALL NOT trigger in this change because kan is unsupported, but the detector SHALL exist and respond to the `Rinshan` flag |
+| Chankan            | 1               | 1          | Win by ron on a tile that an opponent added to a previously-melded pon to form an open kan; SHALL NOT trigger in this change because kan is unsupported, but the detector SHALL exist and respond to the `Chankan` flag |
+| Tenhou             | yakuman         | n/a        | Dealer wins by tsumo on their initial 14-tile deal with no intervening calls; concealed only |
+| Chiihou            | yakuman         | n/a        | Non-dealer wins by tsumo on their first uninterrupted draw with no intervening calls; concealed only |
 | Toitoi             | 2               | 2          | All triplets/kans                                               |
 | Honitsu            | 3               | 2          | One numeric suit plus honors                                    |
 | Sanshoku doujun    | 2               | 1          | Same numeric sequence in all three suits                        |
@@ -122,6 +130,8 @@ The system SHALL detect the following yaku and report the han value of each, sum
 | Shousangen         | 2 + yakuhai     | 2 + yakuhai| Two dragon triplets plus a dragon pair (yakuhai still counts each dragon triplet) |
 | Ryanpeikou         | 3               | n/a        | Two distinct iipeikou shapes, concealed only; supersedes iipeikou|
 | Chinitsu           | 6               | 5          | One numeric suit only, no honors                                |
+
+The eight rows above the existing detectors (Double riichi, Ippatsu, Haitei, Houtei, Rinshan kaihou, Chankan, Tenhou, Chiihou) are the **Group C situational yaku**. Their detection depends on game-loop state surfaced via eight new bool flags on `yaku.Context`: `DoubleRiichi`, `Ippatsu`, `Haitei`, `Houtei`, `Rinshan`, `Chankan`, `Tenhou`, `Chiihou`. Each detector SHALL match if and only if its corresponding flag is true at agari (subject to its concealment requirement where applicable).
 
 #### Scenario: Multiple yaku stack
 
@@ -213,6 +223,59 @@ The system SHALL detect the following yaku and report the han value of each, sum
 - **THEN** ryanpeikou matches at 3 han, AND iipeikou does not separately match for that decomposition
 - **WHEN** the hand is open
 - **THEN** ryanpeikou does not match (concealed only)
+
+#### Scenario: Ippatsu matches when flag is set and hand is concealed
+
+- **GIVEN** `Context{Riichi: true, Ippatsu: true}` and a concealed winning hand
+- **WHEN** the system evaluates yaku
+- **THEN** ippatsu matches at 1 han alongside riichi
+- **GIVEN** the same flags but the hand is open (impossible in practice because riichi requires concealed, but tested defensively)
+- **THEN** ippatsu SHALL NOT match
+
+#### Scenario: Double riichi suppresses regular riichi
+
+- **GIVEN** `Context{Riichi: true, DoubleRiichi: true}` and a concealed winning hand
+- **WHEN** the system evaluates yaku
+- **THEN** double riichi matches at 2 han AND regular riichi SHALL NOT separately match
+
+#### Scenario: Haitei matches a tsumo on the last live-wall draw
+
+- **GIVEN** `Context{IsTsumo: true, Haitei: true}` and a winning hand
+- **WHEN** the system evaluates yaku
+- **THEN** haitei matches at 1 han
+- **GIVEN** `Context{IsTsumo: false, Haitei: true}` (ron with the haitei flag — invalid combination)
+- **THEN** haitei SHALL NOT match
+
+#### Scenario: Houtei matches a ron on the very last discard
+
+- **GIVEN** `Context{IsTsumo: false, Houtei: true}` and a winning hand
+- **WHEN** the system evaluates yaku
+- **THEN** houtei matches at 1 han
+- **GIVEN** `Context{IsTsumo: true, Houtei: true}` (tsumo with the houtei flag — invalid combination)
+- **THEN** houtei SHALL NOT match
+
+#### Scenario: Tenhou matches dealer's first-deal tsumo
+
+- **GIVEN** `Context{Tenhou: true, IsTsumo: true, Seat: East}` and a concealed winning hand
+- **WHEN** the system evaluates yaku
+- **THEN** tenhou matches as a yakuman
+- **GIVEN** the same context with a non-dealer seat or an open hand
+- **THEN** tenhou SHALL NOT match (the game loop SHALL NOT set the flag in those cases)
+
+#### Scenario: Chiihou matches non-dealer's first-draw tsumo
+
+- **GIVEN** `Context{Chiihou: true, IsTsumo: true, Seat: South}` and a concealed winning hand with no calls anywhere in the round before this draw
+- **WHEN** the system evaluates yaku
+- **THEN** chiihou matches as a yakuman
+- **GIVEN** the same context but the dealer or another player called pon/chi/kan before this draw
+- **THEN** chiihou SHALL NOT match (the game loop SHALL clear the flag on the first call)
+
+#### Scenario: Rinshan and Chankan detectors stay dormant in this change
+
+- **GIVEN** `Context{Rinshan: true}` or `Context{Chankan: true}`
+- **WHEN** the system evaluates yaku
+- **THEN** the detector code path exists and would match at 1 han
+- **AND** in this change the game loop never sets these flags because kan is unsupported, so neither yaku is observable in actual play; the detectors SHALL nonetheless be unit-tested with the flags forced on so the future kan-support change wires them in without engine changes
 
 ---
 ### Requirement: Fu Calculation
