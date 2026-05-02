@@ -45,6 +45,20 @@ type Game struct {
 	// testOpen is a per-seat open flag set by SetTestOpen for tests that
 	// want to plant an "open hand" without going through real call flow.
 	testOpen [numSeats]bool
+
+	// Per-seat riichi state. riichiDeclared flips true on successful
+	// declaration; ippatsuLive tracks the open ippatsu window (closed by
+	// any call from any seat or by the declarer's own next draw);
+	// doubleRiichi flips true when declaration happens on the seat's
+	// first uninterrupted intake (no prior discards, no prior calls).
+	riichiDeclared [numSeats]bool
+	ippatsuLive    [numSeats]bool
+	doubleRiichi   [numSeats]bool
+
+	// Per-seat point totals. Initialized to 25000 in New(). The riichi
+	// deposit deducts 1000; ryuukyoku noten payments and agari payouts
+	// adjust further (payout integration ships with smart-ai).
+	scores [numSeats]int
 }
 
 // Meld is an opened meld (called pon, chi, or kan). A future change adds
@@ -79,6 +93,7 @@ func New(seed int64) *Game {
 	}
 	for seat := range numSeats {
 		g.hands[seat] = deal.Hands[seat]
+		g.scores[seat] = 25000
 	}
 	sortConcealed(g.hands[HumanSeat])
 	g.logf("deal seed=%d dora=%s", seed, deal.DoraIndicator)
@@ -186,6 +201,15 @@ var ErrIllegalDiscard = errors.New("game: illegal discard index")
 // allowed" rule keeps the player in their current state.
 var ErrYakulessWin = errors.New("game: winning shape has no yaku")
 
+// ErrIllegalRiichi is returned when InputDiscard{Riichi: true} fails any of
+// the four preconditions: hand is open, score < 1000, wall has < 4 tiles,
+// or post-discard hand is not tenpai.
+var ErrIllegalRiichi = errors.New("game: illegal riichi declaration")
+
+// ErrFuritenRon is returned when a human ron claim is rejected because
+// the seat's machi tile appears in their own pond (permanent furiten).
+var ErrFuritenRon = errors.New("game: ron blocked by furiten")
+
 func (g *Game) stepFromAwaitingDraw(s StateAwaitingDraw, in Input) (Event, error) {
 	if _, ok := in.(InputDraw); !ok {
 		return nil, ErrInvalidInputForState
@@ -209,12 +233,44 @@ func (g *Game) stepFromAwaitingDiscard(s StateAwaitingDiscard, in Input) (Event,
 		if v.Index < 0 || v.Index >= len(g.hands[s.Player]) {
 			return nil, ErrIllegalDiscard
 		}
+		// Riichi-restricted discard: a seat that has already declared
+		// riichi may only discard the just-drawn tile (rightmost slot).
+		// The riichi-declaring discard itself is the seat's own choice;
+		// every subsequent turn is forced to drawn-only.
+		if g.riichiDeclared[s.Player] && !v.Riichi &&
+			v.Index != len(g.hands[s.Player])-1 {
+			return nil, ErrIllegalDiscard
+		}
+		// Riichi declaration: validate the four preconditions first.
+		// On success we record the deposit + flags before the discard
+		// transition completes so doubleRiichi sees the pre-discard
+		// noPriorDiscards() / !callsHappened state.
+		var declareDoubleRiichi bool
+		if v.Riichi {
+			if err := g.validateRiichi(s.Player, v.Index); err != nil {
+				return nil, err
+			}
+			declareDoubleRiichi = !g.callsHappened && g.noPriorDiscards()
+		}
 		t := g.hands[s.Player][v.Index]
 		g.hands[s.Player] = append(g.hands[s.Player][:v.Index], g.hands[s.Player][v.Index+1:]...)
 		g.discards[s.Player] = append(g.discards[s.Player], t)
 		g.hasDiscarded[s.Player] = true
 		if s.Player == HumanSeat {
 			sortConcealed(g.hands[s.Player])
+		}
+		if v.Riichi {
+			g.scores[s.Player] -= 1000
+			g.riichiDeclared[s.Player] = true
+			g.ippatsuLive[s.Player] = true
+			g.doubleRiichi[s.Player] = declareDoubleRiichi
+			g.logf("riichi %s", seatName(s.Player))
+		} else if g.riichiDeclared[s.Player] {
+			// This is the seat's 2nd-or-later discard since declaring
+			// riichi (the declaration discard set v.Riichi=true and
+			// took the other branch). Their own non-tsumo turn passed,
+			// so ippatsu is no longer reachable for them.
+			g.ippatsuLive[s.Player] = false
 		}
 		g.logf("discard %s %s", seatName(s.Player), t)
 		g.state = StateAwaitingClaims{Discard: t, Discarder: s.Player}
@@ -262,6 +318,13 @@ func (g *Game) stepFromAwaitingClaims(s StateAwaitingClaims, in Input) (Event, e
 	}
 	switch kind {
 	case ClaimRon:
+		// Furiten blocks the human ron: a winning shape with the seat's
+		// machi tile in its own pond is illegal. v1 only enforces this
+		// for the human (bots never ron). When bot ron lands, this gate
+		// applies to all seats.
+		if winner == HumanSeat && g.IsFuriten(winner) {
+			return nil, ErrFuritenRon
+		}
 		concealed := append([]tile.Tile(nil), g.hands[winner]...)
 		concealed = append(concealed, s.Discard)
 		h := hand.Hand{
@@ -272,6 +335,9 @@ func (g *Game) stepFromAwaitingClaims(s StateAwaitingClaims, in Input) (Event, e
 		}
 		ctx := g.contextForWin(winner, false)
 		result := calc.Analyze(h, ctx)
+		if result == nil {
+			return nil, ErrYakulessWin
+		}
 		g.logf("ron %s from %s on %s", seatName(winner), seatName(s.Discarder), s.Discard)
 		g.state = StateRoundOver{Outcome: OutcomeRon{
 			Winner: winner,
@@ -299,6 +365,10 @@ func (g *Game) stepFromAwaitingClaims(s StateAwaitingClaims, in Input) (Event, e
 		// Pop the discard from discarder's pond — it's been called.
 		g.popLastDiscard(s.Discarder)
 		g.callsHappened = true
+		// Any successful call breaks the ippatsu window for every seat
+		// currently in riichi (including the caller themselves, though
+		// they can't be in riichi if they're calling pon).
+		g.closeAllIppatsuWindows()
 		if winner == HumanSeat {
 			sortConcealed(g.hands[winner])
 		}
@@ -327,6 +397,7 @@ func (g *Game) stepFromAwaitingClaims(s StateAwaitingClaims, in Input) (Event, e
 		})
 		g.popLastDiscard(s.Discarder)
 		g.callsHappened = true
+		g.closeAllIppatsuWindows()
 		if winner == HumanSeat {
 			sortConcealed(g.hands[winner])
 		}
@@ -335,6 +406,17 @@ func (g *Game) stepFromAwaitingClaims(s StateAwaitingClaims, in Input) (Event, e
 		return EventNop{}, nil
 	}
 	return nil, fmt.Errorf("game: unhandled claim kind %d", kind)
+}
+
+// closeAllIppatsuWindows clears the ippatsu window for every riichi-declared
+// seat. Called from successful pon and chi branches: any call breaks ippatsu
+// for everyone currently in riichi.
+func (g *Game) closeAllIppatsuWindows() {
+	for seat := range Seat(numSeats) {
+		if g.riichiDeclared[seat] {
+			g.ippatsuLive[seat] = false
+		}
+	}
 }
 
 func (g *Game) consumeForPon(s Seat, t tile.Tile) bool {
@@ -388,20 +470,26 @@ func (g *Game) popLastDiscard(s Seat) {
 
 // contextForWin builds a calc.Context for the given winning seat. Group C
 // flags are populated from game state:
+//   - Riichi: seat declared riichi this round.
+//   - Ippatsu: seat is in riichi and the ippatsu window is still open
+//     (closed by any call or by the seat's own next draw).
+//   - DoubleRiichi: seat declared riichi on their first uninterrupted intake
+//     (no prior discards anywhere, no prior calls).
 //   - Haitei: tsumo on the very last live-wall tile.
 //   - Houtei: ron on a discard that left the live wall empty.
 //   - Tenhou: dealer wins by tsumo with no calls and no prior discards.
 //   - Chiihou: non-dealer wins by tsumo with no calls and no prior discards
 //     by anyone (including the dealer).
 //
-// Ippatsu / DoubleRiichi require riichi declaration tracking, which is not
-// yet plumbed (no v1 caller declares riichi); those flags stay false.
 // Rinshan / Chankan require kan support, deferred to add-kan-support.
 func (g *Game) contextForWin(winner Seat, isTsumo bool) calc.Context {
 	ctx := calc.Context{
-		SeatWind:  winner.SeatWind(),
-		RoundWind: g.roundWind,
-		Dora:      g.doraIndicators,
+		SeatWind:     winner.SeatWind(),
+		RoundWind:    g.roundWind,
+		Dora:         g.doraIndicators,
+		Riichi:       g.riichiDeclared[winner],
+		Ippatsu:      g.riichiDeclared[winner] && g.ippatsuLive[winner],
+		DoubleRiichi: g.doubleRiichi[winner],
 	}
 	if isTsumo && g.wall.LiveRemaining() == 0 {
 		ctx.Haitei = true
@@ -499,7 +587,65 @@ func (g *Game) SetTestOpen(s Seat, open bool) {
 	g.testOpen[s] = open
 }
 
+// SetTestPond replaces a seat's discard pond wholesale. Test-only — used
+// to plant furiten setups (machi tile in own pond) without driving a
+// full round of discards.
+func (g *Game) SetTestPond(s Seat, tiles []tile.Tile) {
+	g.discards[s] = append(g.discards[s][:0], tiles...)
+}
+
 // IsHandOpen reports whether the seat's hand has any called melds.
 func (g *Game) IsHandOpen(s Seat) bool {
 	return g.testOpen[s] || len(g.melds[s]) > 0
+}
+
+// IsFuriten reports whether the seat is in permanent furiten — any tile in
+// the seat's own pond matches a tile ID in the seat's current machi. Returns
+// false for non-tenpai shapes (machi is undefined). v1 only implements
+// permanent furiten; temporary furiten across opponent discards lands when
+// bot ron is wired in add-smart-ai.
+func (g *Game) IsFuriten(s Seat) bool {
+	if len(g.hands[s]) != 13 {
+		return false
+	}
+	machi := hand.Machi(hand.Hand{Concealed: g.hands[s]})
+	if len(machi) == 0 {
+		return false
+	}
+	machiSet := make(map[uint8]struct{}, len(machi))
+	for _, id := range machi {
+		machiSet[id] = struct{}{}
+	}
+	for _, t := range g.discards[s] {
+		if _, ok := machiSet[t.ID]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// validateRiichi runs the four legality checks for a riichi declaration on
+// behalf of seat `s` discarding the tile at `index`. Returns ErrIllegalRiichi
+// when any check fails. Does not mutate state.
+func (g *Game) validateRiichi(s Seat, index int) error {
+	if g.IsHandOpen(s) {
+		return ErrIllegalRiichi
+	}
+	if g.scores[s] < 1000 {
+		return ErrIllegalRiichi
+	}
+	if g.wall.LiveRemaining() < 4 {
+		return ErrIllegalRiichi
+	}
+	// Build the post-discard 13-tile hand WITHOUT mutating state, then
+	// check shanten. The drawn-tile invariant means the human's index 13
+	// is at len-1, but riichi may also be declared on a non-rightmost
+	// tile (the player can sacrifice a sorted-hand tile to enter tenpai).
+	postDiscard := make([]tile.Tile, 0, len(g.hands[s])-1)
+	postDiscard = append(postDiscard, g.hands[s][:index]...)
+	postDiscard = append(postDiscard, g.hands[s][index+1:]...)
+	if hand.Shanten(hand.Hand{Concealed: postDiscard}) != 0 {
+		return ErrIllegalRiichi
+	}
+	return nil
 }

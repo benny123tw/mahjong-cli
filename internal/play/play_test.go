@@ -419,3 +419,175 @@ func TestBotTickAdvancesBotTurn(t *testing.T) {
 		)
 	}
 }
+
+// fourteenTileTenpai14 is the 14-tile fixture used across riichi/ron tests.
+// Discarding index 13 leaves a tenpai 13-tile shape with machi {4s, 7s}.
+func fourteenTileTenpai14() []tile.Tile {
+	return []tile.Tile{
+		{ID: tile.M1},
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.P1},
+		{ID: tile.P2},
+		{ID: tile.P3},
+		{ID: tile.S1},
+		{ID: tile.S2},
+		{ID: tile.S3},
+		{ID: tile.S5},
+		{ID: tile.S6},
+		{ID: tile.Haku},
+		{ID: tile.Haku},
+		{ID: tile.M5}, // unrelated drawn tile to discard
+	}
+}
+
+func TestRiichiKeyDeclaresRiichiWhenLegal(t *testing.T) {
+	g := game.New(7)
+	g.SetTestHand(game.SeatSouth, fourteenTileTenpai14())
+	g.SetTestState(game.StateAwaitingDiscard{Player: game.SeatSouth})
+
+	m := NewWithGame(UnicodeRenderer{}, g)
+	m.cursor = 13
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'r'})
+	mu := updated.(Model)
+
+	if _, ok := mu.GameState().(game.StateAwaitingClaims); !ok {
+		t.Errorf(
+			"after R-press in discard state with tenpai hand, state = %T, want StateAwaitingClaims",
+			mu.GameState(),
+		)
+	}
+	if mu.AckText() != "" {
+		t.Errorf("ackText after legal riichi = %q, want empty", mu.AckText())
+	}
+}
+
+func TestRiichiKeyRejectedWithDescriptiveAck(t *testing.T) {
+	g := game.New(7)
+	// 14-tile hand where discarding index 0 leaves a non-tenpai shape.
+	noisy := []tile.Tile{
+		{ID: tile.M1},
+		{ID: tile.M3},
+		{ID: tile.M5},
+		{ID: tile.M7},
+		{ID: tile.M9},
+		{ID: tile.P1},
+		{ID: tile.P3},
+		{ID: tile.P5},
+		{ID: tile.P7},
+		{ID: tile.P9},
+		{ID: tile.S1},
+		{ID: tile.S3},
+		{ID: tile.S5},
+		{ID: tile.S7},
+	}
+	g.SetTestHand(game.SeatSouth, noisy)
+	g.SetTestState(game.StateAwaitingDiscard{Player: game.SeatSouth})
+
+	m := NewWithGame(UnicodeRenderer{}, g)
+	m.cursor = 0
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'r'})
+	mu := updated.(Model)
+
+	if !strings.Contains(mu.AckText(), "tenpai") {
+		t.Errorf("ackText after illegal riichi = %q, want substring 'tenpai'", mu.AckText())
+	}
+}
+
+// ronReadyHand is a 13-tile hand that wins yakufully on 7s (tanyao + pinfu shape).
+func ronReadyHand() []tile.Tile {
+	return []tile.Tile{
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.M4},
+		{ID: tile.P2},
+		{ID: tile.P3},
+		{ID: tile.P4},
+		{ID: tile.S2},
+		{ID: tile.S3},
+		{ID: tile.S4},
+		{ID: tile.M4},
+		{ID: tile.M4},
+		{ID: tile.S5},
+		{ID: tile.S6},
+	}
+}
+
+func TestRonKeyDeclaresRonWhenLegal(t *testing.T) {
+	g := game.New(7)
+	g.SetTestHand(game.SeatSouth, ronReadyHand())
+	g.SetTestState(
+		game.StateAwaitingClaims{Discard: tile.Tile{ID: tile.S7}, Discarder: game.SeatEast},
+	)
+
+	m := NewWithGame(UnicodeRenderer{}, g)
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'r'})
+	mu := updated.(Model)
+
+	st, ok := mu.GameState().(game.StateRoundOver)
+	if !ok {
+		t.Fatalf(
+			"after R-press in claims with ron-ready hand, state = %T, want StateRoundOver",
+			mu.GameState(),
+		)
+	}
+	if _, ok := st.Outcome.(game.OutcomeRon); !ok {
+		t.Errorf("outcome = %T, want OutcomeRon", st.Outcome)
+	}
+}
+
+func TestRonKeyRejectedWhenFuriten(t *testing.T) {
+	g := game.New(7)
+	g.SetTestHand(game.SeatSouth, ronReadyHand())
+	// Plant 7s in own pond → permanent furiten.
+	g.SetTestPond(game.SeatSouth, []tile.Tile{{ID: tile.S7}})
+	g.SetTestState(
+		game.StateAwaitingClaims{Discard: tile.Tile{ID: tile.S7}, Discarder: game.SeatEast},
+	)
+
+	m := NewWithGame(UnicodeRenderer{}, g)
+	updated, _ := m.Update(tea.KeyPressMsg{Code: 'r'})
+	mu := updated.(Model)
+
+	if _, ok := mu.GameState().(game.StateAwaitingClaims); !ok {
+		t.Errorf(
+			"after R-press with furiten, state = %T, want unchanged StateAwaitingClaims",
+			mu.GameState(),
+		)
+	}
+	if !strings.Contains(mu.AckText(), "furiten") {
+		t.Errorf("ackText after furiten ron = %q, want substring 'furiten'", mu.AckText())
+	}
+}
+
+func TestCallFooterShowsLiveRonWhenLegal(t *testing.T) {
+	g := game.New(7)
+	g.SetTestHand(game.SeatSouth, ronReadyHand())
+	g.SetTestState(
+		game.StateAwaitingClaims{Discard: tile.Tile{ID: tile.S7}, Discarder: game.SeatEast},
+	)
+
+	m := NewWithGame(UnicodeRenderer{}, g)
+	footer := m.RenderCallFooter()
+	if !strings.Contains(footer, "[R]on") {
+		t.Errorf("footer = %q, want [R]on label", footer)
+	}
+	if strings.Contains(footer, "(furiten)") {
+		t.Errorf("footer = %q, should NOT contain (furiten) when not in furiten", footer)
+	}
+}
+
+func TestCallFooterShowsFuritenSuffixWhenBlocked(t *testing.T) {
+	g := game.New(7)
+	g.SetTestHand(game.SeatSouth, ronReadyHand())
+	g.SetTestPond(game.SeatSouth, []tile.Tile{{ID: tile.S7}})
+	g.SetTestState(
+		game.StateAwaitingClaims{Discard: tile.Tile{ID: tile.S7}, Discarder: game.SeatEast},
+	)
+
+	m := NewWithGame(UnicodeRenderer{}, g)
+	footer := m.RenderCallFooter()
+	if !strings.Contains(footer, "(furiten)") {
+		t.Errorf("footer = %q, want (furiten) suffix when permanent furiten blocks ron", footer)
+	}
+}

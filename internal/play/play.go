@@ -21,6 +21,7 @@ import (
 	"charm.land/lipgloss/v2"
 
 	"github.com/benny123tw/mahjong-cli/internal/game"
+	"github.com/benny123tw/mahjong-cli/internal/riichi/calc"
 	"github.com/benny123tw/mahjong-cli/internal/riichi/hand"
 	"github.com/benny123tw/mahjong-cli/internal/riichi/tile"
 )
@@ -265,8 +266,7 @@ func (m Model) handleKey(key string) (tea.Model, tea.Cmd) {
 	case " ", "space":
 		return m.handlePass(), nil
 	case "r":
-		m.ackText = "riichi: not implemented in v1 (deferred to add-smart-ai)"
-		m.ackKey = key
+		return m.handleRiichiOrRon(), nil
 	case "p":
 		return m.handlePon(), nil
 	case "c":
@@ -348,6 +348,104 @@ func (m Model) handlePass() Model {
 	return m
 }
 
+// handleRiichiOrRon dispatches the `r` key based on the current game state.
+// In AwaitingDiscard{Human}, R declares riichi. In AwaitingClaims with the
+// human as a non-discarder, R declares ron. Anywhere else, R is a no-op.
+func (m Model) handleRiichiOrRon() Model {
+	if m.game == nil {
+		return m
+	}
+	switch s := m.game.State().(type) {
+	case game.StateAwaitingDiscard:
+		if s.Player == HumanSeat {
+			return m.handleRiichi()
+		}
+	case game.StateAwaitingClaims:
+		if s.Discarder != HumanSeat {
+			return m.handleRon()
+		}
+	}
+	return m
+}
+
+// handleRiichi submits InputDiscard{Index: cursor, Riichi: true}. On
+// ErrIllegalRiichi, probe each precondition to surface a specific reason
+// in ackText. On success, clear ackText.
+func (m Model) handleRiichi() Model {
+	if m.game == nil {
+		return m
+	}
+	if _, err := m.game.Step(game.InputDiscard{Index: m.cursor, Riichi: true}); err != nil {
+		m.ackText = riichiRejectionReason(m.game, m.cursor)
+		return m
+	}
+	m.ackText = ""
+	return m
+}
+
+// riichiRejectionReason explains why a riichi declaration was rejected by
+// re-checking each of the four preconditions in order. Used to give the
+// player a specific footer hint instead of a bare "illegal" message.
+func riichiRejectionReason(g *game.Game, cursor int) string {
+	if g.IsHandOpen(HumanSeat) {
+		return "riichi: hand is open"
+	}
+	if g.Wall().LiveRemaining() < 4 {
+		return "riichi: wall has <4 tiles"
+	}
+	humanHand := g.Hand(HumanSeat)
+	if cursor < 0 || cursor >= len(humanHand) {
+		return "riichi: cursor out of range"
+	}
+	postDiscard := append([]tile.Tile{}, humanHand[:cursor]...)
+	postDiscard = append(postDiscard, humanHand[cursor+1:]...)
+	if hand.Shanten(hand.Hand{Concealed: postDiscard}) != 0 {
+		return "riichi: hand not tenpai"
+	}
+	// Score check ordering matches engine; if all other checks pass but the
+	// engine still rejected, score must be the issue.
+	return "riichi: insufficient funds"
+}
+
+// handleRon submits InputResolveClaims with ClaimRon. On no-yaku or furiten,
+// surface a specific reason in ackText.
+func (m Model) handleRon() Model {
+	if m.game == nil {
+		return m
+	}
+	cs, ok := m.game.State().(game.StateAwaitingClaims)
+	if !ok {
+		return m
+	}
+	humanHand := m.game.Hand(HumanSeat)
+	concealed := append([]tile.Tile{}, humanHand...)
+	concealed = append(concealed, cs.Discard)
+	h := hand.Hand{
+		Concealed: concealed,
+		Winning:   cs.Discard,
+		IsTsumo:   false,
+		Open:      m.game.IsHandOpen(HumanSeat),
+	}
+	if calc.Analyze(h, calc.Context{
+		SeatWind:  HumanSeat.SeatWind(),
+		RoundWind: m.game.RoundWind(),
+		Dora:      m.game.DoraIndicators(),
+	}) == nil {
+		m.ackText = "ron: no yaku"
+		return m
+	}
+	if m.game.IsFuriten(HumanSeat) {
+		m.ackText = "ron: furiten"
+		return m
+	}
+	if _, err := m.game.Step(game.InputResolveClaims{Claims: map[game.Seat]game.Claim{
+		HumanSeat: {Kind: game.ClaimRon},
+	}}); err != nil {
+		m.ackText = "ron: " + err.Error()
+	}
+	return m
+}
+
 func (m Model) handlePon() Model {
 	if m.game == nil {
 		return m
@@ -408,17 +506,43 @@ func (m Model) RenderCallFooter() string {
 	canPon := game.CanPon(humanHand, cs.Discard)
 	canChi := len(game.CanChi(humanHand, cs.Discard, cs.Discarder, HumanSeat)) > 0
 
+	// Compute ron legality: the hand must form a yaku-bearing winning shape
+	// on `concealed + discard`, and the human must NOT be in permanent
+	// furiten. The furiten case gets a `(furiten)` suffix so the player
+	// understands why ron is unavailable; a no-yaku case just greys out.
+	concealedPlusDiscard := append([]tile.Tile{}, humanHand...)
+	concealedPlusDiscard = append(concealedPlusDiscard, cs.Discard)
+	canWin := calc.Analyze(hand.Hand{
+		Concealed: concealedPlusDiscard,
+		Winning:   cs.Discard,
+		IsTsumo:   false,
+		Open:      m.game.IsHandOpen(HumanSeat),
+	}, calc.Context{
+		SeatWind:  HumanSeat.SeatWind(),
+		RoundWind: m.game.RoundWind(),
+		Dora:      m.game.DoraIndicators(),
+	}) != nil
+	furiten := m.game.IsFuriten(HumanSeat)
+	canRon := canWin && !furiten
+	furitenBlock := canWin && furiten
+
 	render := func(label string, active bool) string {
 		if active {
 			return liveKeyStyle.Render(label)
 		}
 		return greyedKeyStyle.Render(label)
 	}
+	ronLabel := "[R]on"
+	if furitenBlock {
+		ronLabel = "[R]on (furiten)"
+	}
+	// [K]an stays a hardcoded placeholder until kan support lands. The
+	// asymmetry is intentional: ron logic is wired here, kan is not.
 	parts := []string{
 		render("[P]on", canPon),
 		render("[C]hi", canChi),
 		render("[K]an (greyed)", false),
-		render("[R]on (greyed)", false),
+		render(ronLabel, canRon),
 		liveKeyStyle.Render("[Space] Pass"),
 	}
 	return strings.Join(parts, "  ")

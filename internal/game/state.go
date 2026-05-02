@@ -112,7 +112,15 @@ type InputDraw struct{}
 
 // InputDiscard — only valid in StateAwaitingDiscard. Removes the tile at
 // `Index` from the active player's hand.
-type InputDiscard struct{ Index int }
+//
+// When `Riichi` is true, the discard doubles as a riichi declaration. The
+// engine validates four preconditions before accepting (concealed hand,
+// ≥1000 points, ≥4 wall tiles remaining, post-discard tenpai); on failure
+// it returns ErrIllegalRiichi and leaves state unchanged.
+type InputDiscard struct {
+	Index  int
+	Riichi bool
+}
 
 // InputDeclareTsumo — only valid in StateAwaitingDiscard. Active player
 // claims the just-drawn tile is the winning tile.
