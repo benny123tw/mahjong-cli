@@ -8,12 +8,15 @@ TBD - created by archiving change 'add-tui-skeleton'. Update Purpose after archi
 
 ### Requirement: Play Subcommand Launch
 
-The system SHALL expose the play screen via the `mahjong play` cobra subcommand with two flags: `--ascii` (boolean) and `--seed <integer>`. The subcommand SHALL launch a bubbletea v2 program that constructs a `*game.Game` from the seed (or an OS-derived random seed when omitted) and renders the live game state. The subcommand SHALL exit cleanly when the user presses `q` or sends Ctrl+C.
+The system SHALL expose the play screen via the `mahjong play` cobra subcommand with three flags: `--ascii` (boolean, default false), `--seed <integer>`, and `--no-akadora` (boolean, default false). The subcommand SHALL launch a bubbletea v2 program that constructs a `*game.Match` (which builds the per-hand `*game.Game`) from the seed (or an OS-derived random seed when omitted) and renders the live game state. The subcommand SHALL exit cleanly when the user presses `q` or sends Ctrl+C.
+
+When `--no-akadora` is omitted or set to false (the default), the subcommand SHALL construct the match via `game.NewMatch(seed)` so akadora is enabled. When `--no-akadora` is set to true, the subcommand SHALL construct the match via `game.NewMatchWithOptions(seed, game.MatchOptions{Akadora: false})` so the wall contains zero red tiles for the entire hanchan.
 
 #### Scenario: Default launch starts a new randomly-seeded game
 
 - **WHEN** the user runs `mahjong play`
 - **THEN** the program prints a `Seed: <integer>` line at startup and starts an interactive game with bot opponents in seats East, West, North (the human is South by default)
+- **AND** the wall contains one red copy of each five (akadora is on by default)
 
 #### Scenario: ASCII flag selects the ASCII renderer
 
@@ -27,10 +30,46 @@ The system SHALL expose the play screen via the `mahjong play` cobra subcommand 
 - **THEN** the wall, dealing, and all bot probabilistic decisions are derived from seed 42
 - **AND** running `mahjong play --seed 42` again produces a byte-identical sequence of game events
 
+#### Scenario: No-akadora flag disables red fives for the whole match
+
+- **WHEN** the user runs `mahjong play --no-akadora --seed 42`
+- **THEN** every wall constructed during the hanchan (all 8+ hands) contains zero red tiles
+- **AND** the dora/ura-dora/akadora-han contribution from red fives is zero throughout the match
+- **AND** running `mahjong play --no-akadora --seed 42` again produces a byte-identical sequence of game events
+
 #### Scenario: Ctrl+C exits cleanly
 
 - **WHEN** the user sends Ctrl+C while the program is running
 - **THEN** the program returns from its main loop with no error and the terminal state is restored
+
+
+<!-- @trace
+source: add-akadora
+updated: 2026-05-02
+code:
+  - internal/game/wall.go
+  - internal/game/state.go
+  - testdata/game/golden/seed-42.json
+  - internal/game/kan.go
+  - internal/game/call.go
+  - internal/game/payout.go
+  - internal/play/kan_keys.go
+  - internal/play/play.go
+  - cmd/play.go
+  - internal/game/bot.go
+  - internal/game/match.go
+  - internal/game/turn.go
+tests:
+  - internal/game/match_test.go
+  - internal/play/kan_keys_test.go
+  - internal/game/kan_test.go
+  - internal/game/bot_test.go
+  - internal/play/play_test.go
+  - internal/game/furiten_test.go
+  - internal/game/payout_test.go
+  - internal/game/turn_test.go
+  - internal/game/wall_test.go
+-->
 
 ---
 ### Requirement: Play Screen Layout
@@ -148,7 +187,7 @@ The system SHALL provide three tile-rendering implementations behind a shared `R
 ---
 ### Requirement: Keybinding Map
 
-The system SHALL bind the documented keymap. Cursor-movement keys SHALL update the focused tile within the player's hand. Action keys SHALL drive real game-state transitions: `D` or Enter discards the focused tile; `R` declares riichi (when legal — concealed hand at tenpai with at least 1000 points); `T` declares tsumo on a winning drawn tile; `P` / `C` / `K` / `R` / `Space` operate inside the call-window prompt. `K` (kan) SHALL render greyed in v1 and SHALL NOT advance state regardless of context.
+The system SHALL bind the documented keymap. Cursor-movement keys SHALL update the focused tile within the player's hand. Action keys SHALL drive real game-state transitions: `D` or Enter discards the focused tile; `R` declares riichi (when legal — concealed hand at tenpai with at least 1000 points); `T` declares tsumo on a winning drawn tile; `P` / `C` / `K` / `R` / `Space` operate inside the call-window prompt. The `K` key in `StateAwaitingDiscard{Player: HumanSeat}` SHALL open the kan picker (ankan or shouminkan) when the human has any eligible kan declaration; in `StateAwaitingClaims` it SHALL submit a `ClaimKan` minkan claim when the human's hand contains 3 of the discarded tile. The `K` key SHALL be greyed when the human has declared riichi (riichi-and-kan interaction deferred).
 
 #### Scenario: Cursor moves right with arrow or l
 
@@ -176,27 +215,70 @@ The system SHALL bind the documented keymap. Cursor-movement keys SHALL update t
 - **WHEN** the human presses `R` while their hand is open or not yet at tenpai
 - **THEN** state does not change and a brief footer feedback indicates riichi is illegal in the current state
 
-#### Scenario: Kan key is greyed in v1
+#### Scenario: Kan key opens picker when ankan is eligible
 
-- **WHEN** the human presses `K` at any state
-- **THEN** state does not change (kan is not supported in this change)
+- **GIVEN** the underlying state is `AwaitingDiscard{Player: HumanSeat}` and the human's concealed hand contains four `5p` tiles
+- **WHEN** the human presses `K`
+- **THEN** the footer shows a kan picker listing `5p` as the eligible declaration
+- **AND** pressing the corresponding selector key submits `InputDeclareAnkan{TileID: tile.P5}`
+
+#### Scenario: Kan key submits minkan in claim window
+
+- **GIVEN** the underlying state is `AwaitingClaims{Discard: 5p, Discarder: SeatEast}` and the human has three `5p` in hand
+- **WHEN** the human presses `K`
+- **THEN** the engine receives `Claim{Kind: ClaimKan}` for the human seat and the round transitions to `StateAwaitingDiscard{Player: HumanSeat}` after the kan resolves
+
+#### Scenario: Kan key greyed during human's riichi
+
+- **GIVEN** the human has declared riichi (`Game.IsRiichiDeclared(HumanSeat)` is true)
+- **WHEN** the human presses `K` in `StateAwaitingDiscard`
+- **THEN** the kan declaration does not fire and the footer shows a greyed indicator
 
 ##### Example: full keymap
 
-| Key            | Behavior in this change                                                  |
-| -------------- | ------------------------------------------------------------------------ |
-| `←`, `→`, h, l | Move cursor across the player's hand                                     |
-| 1–9            | Jump cursor to nth tile                                                  |
-| D, Enter       | Discard tile under cursor (when in `AwaitingDiscard` state)             |
-| R              | Declare riichi (when legal: concealed, tenpai, ≥ 1000 points)           |
-| T              | Tsumo on the drawn tile (when winning hand with at least one yaku)      |
-| P              | Pon (in call window only, when legal)                                    |
-| C              | Chi (in call window only, only from kamicha, when legal)                |
-| K              | Kan (always greyed in v1)                                                |
-| R              | Ron (in call window only, when winning hand with at least one yaku)     |
-| Space          | Pass in call window; no-op outside call windows                          |
-| ?              | Machi/yaku peek (cached `hand.Shanten` + `hand.Machi` lookup)           |
-| q, Ctrl+C      | Quit cleanly                                                             |
+| Key            | Behavior in this change                                                                  |
+| -------------- | ---------------------------------------------------------------------------------------- |
+| `←`, `→`, h, l | Move cursor across the player's hand                                                     |
+| 1–9            | Jump cursor to nth tile (also picks kan option when picker is open)                      |
+| D, Enter       | Discard tile under cursor (when in `AwaitingDiscard` state)                              |
+| R              | Declare riichi (when legal: concealed, tenpai, ≥ 1000 points)                            |
+| T              | Tsumo on the drawn tile (when winning hand with at least one yaku, including rinshan)    |
+| P              | Pon (in call window only, when legal)                                                    |
+| C              | Chi (in call window only, only from kamicha, when legal)                                 |
+| K              | Open ankan/shouminkan picker (own turn) or submit minkan claim (call window); greyed when in riichi |
+| R              | Ron (in call window OR chankan window when winning hand with at least one yaku)          |
+| Space          | Pass in call/chankan window; no-op outside call windows                                  |
+| ?              | Machi/yaku peek (cached `hand.Shanten` + `hand.Machi` lookup)                            |
+| q, Ctrl+C      | Quit cleanly                                                                             |
+
+
+<!-- @trace
+source: add-kan-support
+updated: 2026-05-02
+code:
+  - internal/game/turn.go
+  - internal/game/call.go
+  - internal/game/match.go
+  - internal/game/bot.go
+  - testdata/game/golden/seed-42.json
+  - internal/play/play.go
+  - internal/game/kan.go
+  - cmd/play.go
+  - internal/game/wall.go
+  - internal/game/state.go
+  - internal/play/kan_keys.go
+  - internal/game/payout.go
+tests:
+  - internal/game/payout_test.go
+  - internal/play/play_test.go
+  - internal/game/turn_test.go
+  - internal/game/wall_test.go
+  - internal/game/bot_test.go
+  - internal/game/kan_test.go
+  - internal/game/match_test.go
+  - internal/play/kan_keys_test.go
+  - internal/game/furiten_test.go
+-->
 
 ---
 ### Requirement: Call Window Prompt
@@ -427,4 +509,118 @@ tests:
   - internal/game/bot_test.go
   - internal/play/play_test.go
   - internal/game/furiten_test.go
+-->
+
+---
+### Requirement: Match-Bound Model
+
+The play-screen `Model` SHALL hold a `*game.Match` rather than a `*game.Game` so multi-hand state — scores, dealer, round, hand index, honba, riichi sticks — flows through to rendering and transitions. The `NewWithMatch(renderer Renderer, m *game.Match) Model` constructor SHALL be the canonical entry point for the `mahjong play` CLI; `NewWithGame(renderer, g)` MAY remain for tests that need to drive a single round directly. `Model.GameState()` SHALL delegate to `m.match.CurrentGame().State()` so existing per-state rendering paths continue to work unmodified.
+
+#### Scenario: Status bar reflects live match state
+
+- **GIVEN** a model bound to a `*game.Match` at East 2 (handIndex = 1), honba = 1, riichi sticks = 1, scores = `[24000, 25500, 25500, 25000]`
+- **WHEN** the model renders the status row
+- **THEN** the row displays the round name "East 2", honba 1, riichi pool 1, and each seat's current score (the hardcoded "East 1 · Honba 0 · Score 25000" string SHALL NOT appear)
+
+
+<!-- @trace
+source: add-multi-round
+updated: 2026-05-02
+code:
+  - testdata/game/golden/seed-42.json
+  - cmd/play.go
+  - internal/play/play.go
+  - internal/game/match.go
+  - internal/game/bot.go
+  - internal/game/turn.go
+  - internal/game/payout.go
+tests:
+  - internal/game/bot_test.go
+  - internal/game/match_test.go
+  - internal/game/turn_test.go
+  - internal/play/play_test.go
+  - internal/game/furiten_test.go
+  - internal/game/payout_test.go
+-->
+
+---
+### Requirement: End-of-Hand Acknowledgement
+
+When the active hand reaches `StateRoundOver`, the model SHALL invoke `Match.AdvanceFromOutcome` once, capture the returned `TransitionResult`, and store it as a pending acknowledgement. While an acknowledgement is pending, the model SHALL render an end-of-hand summary panel showing the outcome (ron/tsumo/ryuukyoku), per-seat point deltas, post-payout totals, and (if renchan) the new honba count. The next hand's `*Game` SHALL NOT begin processing inputs until the player presses any key, at which point the model clears the pending acknowledgement and resumes normal play with the new hand's state machine. If the `TransitionResult` includes a populated `MatchOutcome`, the acknowledgement SHALL transition to the end-of-match standings screen instead of the next hand.
+
+#### Scenario: Ron at East 1 shows ack panel and waits for keypress
+
+- **GIVEN** a model bound to a match at East 1, dealer = `SeatEast`, with the active game at `StateRoundOver{Outcome: OutcomeRon{Winner: SeatSouth, Loser: SeatEast, Result: ...}}`
+- **WHEN** the model receives any tea.Msg
+- **THEN** `Match.AdvanceFromOutcome` is invoked exactly once
+- **AND** the model renders a panel showing "South ron from East" plus the per-seat deltas
+- **AND** the panel remains visible until any key is pressed
+
+#### Scenario: Keypress on ack panel advances to the next hand
+
+- **GIVEN** the model is showing the end-of-hand ack panel for a non-renchan ron
+- **WHEN** the player presses any key
+- **THEN** the ack panel clears
+- **AND** the model's underlying `*Game` is the new East 2 hand (dealer rotated, handIndex incremented)
+- **AND** rendering resumes the normal play layout
+
+
+<!-- @trace
+source: add-multi-round
+updated: 2026-05-02
+code:
+  - testdata/game/golden/seed-42.json
+  - cmd/play.go
+  - internal/play/play.go
+  - internal/game/match.go
+  - internal/game/bot.go
+  - internal/game/turn.go
+  - internal/game/payout.go
+tests:
+  - internal/game/bot_test.go
+  - internal/game/match_test.go
+  - internal/game/turn_test.go
+  - internal/play/play_test.go
+  - internal/game/furiten_test.go
+  - internal/game/payout_test.go
+-->
+
+---
+### Requirement: End-of-Match Standings Screen
+
+When `Match.IsFinished()` returns true, the model SHALL render a standings screen listing all four seats sorted by final score descending, plus the match-end reason ("hanchan-complete" or "tobi: <seat>"). The screen SHALL accept the `q` key to quit and SHALL ignore all other inputs (no further hands to play). The standings screen SHALL replace the normal play layout entirely (no status bar, no pond zones, no hand row).
+
+#### Scenario: Standings shown on hanchan completion
+
+- **GIVEN** a match that has just finished South 4 with non-renchan outcome and `Match.FinalOutcome().Reason == "hanchan-complete"`, scores `[26500, 24500, 27500, 21500]`
+- **WHEN** the model renders
+- **THEN** the layout shows four rows in descending order: West 27500, East 26500, South 24500, North 21500
+- **AND** the reason "hanchan-complete" is displayed
+- **AND** pressing `q` quits the program
+
+#### Scenario: Standings shown on tobi
+
+- **GIVEN** a match that ended due to tobi with `Match.FinalOutcome().Reason == "tobi"`, `BustSeat = SeatNorth`
+- **WHEN** the model renders
+- **THEN** the standings display the four seats with their final scores
+- **AND** the reason "tobi: North" (or equivalent) is shown
+
+<!-- @trace
+source: add-multi-round
+updated: 2026-05-02
+code:
+  - testdata/game/golden/seed-42.json
+  - cmd/play.go
+  - internal/play/play.go
+  - internal/game/match.go
+  - internal/game/bot.go
+  - internal/game/turn.go
+  - internal/game/payout.go
+tests:
+  - internal/game/bot_test.go
+  - internal/game/match_test.go
+  - internal/game/turn_test.go
+  - internal/play/play_test.go
+  - internal/game/furiten_test.go
+  - internal/game/payout_test.go
 -->

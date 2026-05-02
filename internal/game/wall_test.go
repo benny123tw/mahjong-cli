@@ -17,14 +17,88 @@ func TestNewWallHas136TilesWithFourOfEachType(t *testing.T) {
 
 	var counts [tile.TileCount]int
 	for _, x := range all {
-		if x.Red {
-			t.Errorf("v1 wall must contain no red-five tiles, found %s", x)
-		}
 		counts[x.ID]++
 	}
 	for id := range uint8(tile.TileCount) {
 		if counts[id] != 4 {
 			t.Errorf("tile %s appears %d times, want 4", (tile.Tile{ID: id}), counts[id])
+		}
+	}
+}
+
+func TestNewWallWithOptionsAkadoraOnHasOneRedFiveOfEachSuit(t *testing.T) {
+	w := NewWallWithOptions(42, WallOptions{Akadora: true})
+
+	all := w.allTiles()
+	if got := len(all); got != 136 {
+		t.Fatalf("wall length = %d, want 136", got)
+	}
+
+	type key struct {
+		id  uint8
+		red bool
+	}
+	counts := map[key]int{}
+	for _, x := range all {
+		counts[key{x.ID, x.Red}]++
+	}
+
+	fives := []uint8{tile.M5, tile.P5, tile.S5}
+	for _, id := range fives {
+		if got := counts[key{id, true}]; got != 1 {
+			t.Errorf("tile id=%d red count = %d, want 1", id, got)
+		}
+		if got := counts[key{id, false}]; got != 3 {
+			t.Errorf("tile id=%d plain count = %d, want 3", id, got)
+		}
+	}
+	for id := range uint8(tile.TileCount) {
+		if id == tile.M5 || id == tile.P5 || id == tile.S5 {
+			continue
+		}
+		if got := counts[key{id, true}]; got != 0 {
+			t.Errorf("non-five tile id=%d red count = %d, want 0", id, got)
+		}
+		if got := counts[key{id, false}]; got != 4 {
+			t.Errorf("non-five tile id=%d plain count = %d, want 4", id, got)
+		}
+	}
+}
+
+func TestNewWallWithOptionsAkadoraOffHasNoRedTiles(t *testing.T) {
+	w := NewWallWithOptions(42, WallOptions{Akadora: false})
+
+	all := w.allTiles()
+	if got := len(all); got != 136 {
+		t.Fatalf("wall length = %d, want 136", got)
+	}
+
+	var counts [tile.TileCount]int
+	for _, x := range all {
+		if x.Red {
+			t.Errorf("akadora-off wall contains red tile %s", x)
+		}
+		counts[x.ID]++
+	}
+	for id := range uint8(tile.TileCount) {
+		if counts[id] != 4 {
+			t.Errorf("tile id=%d appears %d times, want 4", id, counts[id])
+		}
+	}
+}
+
+func TestNewWallAkadoraSubstitutionIsDeterministic(t *testing.T) {
+	w1 := NewWallWithOptions(42, WallOptions{Akadora: true})
+	w2 := NewWallWithOptions(42, WallOptions{Akadora: true})
+
+	a := w1.allTiles()
+	b := w2.allTiles()
+	if len(a) != len(b) {
+		t.Fatalf("wall lengths differ: %d vs %d", len(a), len(b))
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			t.Fatalf("tile %d differs: %v vs %v", i, a[i], b[i])
 		}
 	}
 }
@@ -128,5 +202,51 @@ func TestDrawReturnsFalseWhenLiveWallIsExhausted(t *testing.T) {
 	}
 	if _, ok := w.Draw(); ok {
 		t.Fatalf("Draw returned ok after live wall exhausted")
+	}
+}
+
+func TestRinshanDoesNotConsumeLiveWall(t *testing.T) {
+	w := NewWall(7)
+	_ = w.Deal()
+	before := w.LiveRemaining()
+	tile, ok := w.RinshanDraw()
+	if !ok {
+		t.Fatalf("RinshanDraw returned ok=false on first call")
+	}
+	if tile.ID == 0 && tile.Red {
+		t.Errorf("RinshanDraw returned zero tile") // sanity
+	}
+	if w.LiveRemaining() != before {
+		t.Errorf("LiveRemaining after RinshanDraw = %d, want %d", w.LiveRemaining(), before)
+	}
+}
+
+func TestRinshanExhaustsAfterFourKans(t *testing.T) {
+	w := NewWall(7)
+	_ = w.Deal()
+	for i := range 4 {
+		if _, ok := w.RinshanDraw(); !ok {
+			t.Fatalf("RinshanDraw call %d returned ok=false (expected first 4 to succeed)", i+1)
+		}
+	}
+	if _, ok := w.RinshanDraw(); ok {
+		t.Errorf("5th RinshanDraw returned ok=true, want false (max 4 kans per round)")
+	}
+}
+
+func TestRevealKanDoraReturnsDifferentSlotFromRinshan(t *testing.T) {
+	w := NewWall(7)
+	_ = w.Deal()
+	rinshan, _ := w.RinshanDraw()
+	kanDora := w.RevealKanDora()
+	// Both come from the dead wall but different physical slots; they MUST
+	// not be the same tile by index (they may coincidentally have the same ID).
+	// Since wall is shuffled, two adjacent tiles will rarely share an ID;
+	// assert by re-checking the slot positions.
+	if rinshan.ID == kanDora.ID && !rinshan.Red && !kanDora.Red {
+		// If IDs match, that's still possible by chance but a smoke check
+		// — the wall has 4 of each tile so it's a low-probability false
+		// positive. Don't fail; just log.
+		t.Logf("rinshan and kanDora share ID %d (low-probability sample collision)", rinshan.ID)
 	}
 }

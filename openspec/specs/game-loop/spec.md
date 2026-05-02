@@ -10,6 +10,10 @@ TBD - created by archiving change 'add-game-loop'. Update Purpose after archive.
 
 The system SHALL construct a 136-tile wall (4 copies each of 34 tile types) for every new round and deal 13 tiles to each of 4 players (seats East / South / West / North) plus reveal one dora indicator from the dead wall. When `--seed N` is supplied to `mahjong play`, the wall shuffle and all bot probabilistic decisions SHALL be deterministic — running the same seed twice produces a byte-identical sequence of dealt hands, draws, discards, calls, and outcomes. Without `--seed`, the system SHALL derive a seed from the OS PRNG and print it at game start.
 
+When akadora is enabled (the default), the wall constructor SHALL substitute exactly one of the four copies of each five-rank tile (5m, 5p, 5s) with the red variant (`Tile{ID: tile.M5/P5/S5, Red: true}`) BEFORE the shuffle step, so deterministic seeds produce identical red-tile placements. When akadora is disabled, all 5-rank tiles SHALL be plain (`Red: false`). The wall MUST always contain exactly 4 copies of each tile by ID regardless of the akadora flag — substitution replaces a copy, it does not add or remove tiles.
+
+The system SHALL expose a new constructor `NewWallWithOptions(seed int64, opts WallOptions) *Wall` that accepts `WallOptions{Akadora bool}`. The legacy `NewWall(seed int64)` SHALL continue to exist and SHALL delegate to `NewWallWithOptions(seed, WallOptions{Akadora: true})` so existing callers automatically get akadora-on, matching modern client conventions.
+
 #### Scenario: Deterministic shuffle with explicit seed
 
 - **GIVEN** the player runs `mahjong play --seed 42`
@@ -28,7 +32,66 @@ The system SHALL construct a 136-tile wall (4 copies each of 34 tile types) for 
 
 - **WHEN** any wall is constructed
 - **THEN** each of the 34 tile types appears in exactly 4 copies, totalling 136 tiles
-- **AND** the wall contains no red-five tiles in v1 (red fives ship with the akadora-toggle change)
+
+#### Scenario: Akadora-on wall contains exactly one red copy of each five
+
+- **GIVEN** the player runs `mahjong play` (akadora default-on) with any seed
+- **WHEN** the wall is constructed via `NewWall(seed)` or `NewWallWithOptions(seed, WallOptions{Akadora: true})`
+- **THEN** the wall contains exactly one tile with `ID == tile.M5 && Red == true`, exactly one with `ID == tile.P5 && Red == true`, and exactly one with `ID == tile.S5 && Red == true`
+- **AND** the wall contains exactly three plain copies of each five (`Red == false`)
+- **AND** the total tile count is still 136
+
+##### Example: red five counts under akadora-on
+
+| ID       | Red==true count | Red==false count | Total |
+| -------- | --------------- | ---------------- | ----- |
+| tile.M5  | 1               | 3                | 4     |
+| tile.P5  | 1               | 3                | 4     |
+| tile.S5  | 1               | 3                | 4     |
+| tile.M1  | 0               | 4                | 4     |
+
+#### Scenario: Akadora-off wall contains no red tiles
+
+- **GIVEN** the player runs `mahjong play --no-akadora --seed 42`
+- **WHEN** the wall is constructed via `NewWallWithOptions(42, WallOptions{Akadora: false})`
+- **THEN** the wall contains zero tiles with `Red == true`
+- **AND** every five-rank tile is plain (`Red == false`)
+- **AND** each tile ID still appears exactly 4 times
+
+#### Scenario: Akadora substitution is deterministic under fixed seed
+
+- **GIVEN** two wall constructions with `NewWallWithOptions(42, WallOptions{Akadora: true})`
+- **WHEN** both walls are inspected tile-by-tile
+- **THEN** the position of every tile (including red fives) is byte-identical between the two walls
+
+
+<!-- @trace
+source: add-akadora
+updated: 2026-05-02
+code:
+  - internal/game/wall.go
+  - internal/game/state.go
+  - testdata/game/golden/seed-42.json
+  - internal/game/kan.go
+  - internal/game/call.go
+  - internal/game/payout.go
+  - internal/play/kan_keys.go
+  - internal/play/play.go
+  - cmd/play.go
+  - internal/game/bot.go
+  - internal/game/match.go
+  - internal/game/turn.go
+tests:
+  - internal/game/match_test.go
+  - internal/play/kan_keys_test.go
+  - internal/game/kan_test.go
+  - internal/game/bot_test.go
+  - internal/play/play_test.go
+  - internal/game/furiten_test.go
+  - internal/game/payout_test.go
+  - internal/game/turn_test.go
+  - internal/game/wall_test.go
+-->
 
 ---
 ### Requirement: Turn Cycle State Machine
@@ -97,41 +160,45 @@ Bot opponents SHALL play a single hand-coded strategy with the following rules:
 
 | Decision | Rule |
 | -------- | ---- |
-| Discard | Pick the tile maximizing isolation (no neighbor within 2 ranks in same suit, no copies elsewhere). Honors and terminals score highest. Tiebreak: lowest tile ID. |
+| Discard | When NO opponent has declared riichi, pick the tile maximizing isolation (no neighbor within 2 ranks in same suit, no copies elsewhere). Honors and terminals score highest. Tiebreak: lowest tile ID. When AT LEAST ONE opponent has declared riichi, pick the tile maximizing a danger-aware score = isolation - 2000 × danger, where danger is 0 for genbutsu (tile-ID matches any tile in a riichi-declarer's pond), 1 for suji-safe against a riichi-declarer (rank pair table — 1↔4, 7↔4, 2↔5, 8↔5, 3↔6, 9↔6 — same suit), and 2 otherwise. The 2000× constant guarantees any safe tile is preferred over any unsafe tile regardless of isolation difference. When multiple riichi declarers exist, danger is the MIN across them (the safest declaration determines the score). |
 | Pon (yakuhai) | Always when bot has 2 copies of a discarded yakuhai tile (round wind, seat wind, or any dragon) |
 | Pon (non-yakuhai) | 50% probability when bot has 2 copies AND bot is at shanten ≤ 2 |
 | Chi | 40% probability, only from kamicha, only when discard completes a 2-tile partial (ryanmen / kanchan / penchan) in bot's hand |
-| Kan | Never |
+| Kan | Never declares any flavor of kan (ankan, minkan, shouminkan). Bots MAY ron on a human's shouminkan upgrade tile via the chankan window — the existing ron path applies with `Chankan = true` populated by the engine. |
 | Riichi | When the bot's 14-tile hand has a discardable index that leaves a tenpai 13-tile shape AND the bot is concealed (no called melds) AND the bot's score is ≥1000 AND `Wall.LiveRemaining()` is ≥4. The bot SHALL pick the FIRST scanned index (0..len-1) whose post-discard hand has shanten=0 and submit `InputDiscard{Index: idx, Riichi: true}`. |
-| Ron | When `calc.Analyze` on the bot's `concealed + discard` returns a non-nil result AND `Game.IsFuriten(seat)` returns false |
+| Ron | When `calc.Analyze` on the bot's `concealed + discard` returns a non-nil result AND `Game.IsFuriten(seat)` returns false (permanent OR temporary furiten blocks ron). Applies to both regular discards and shouminkan upgrade tiles surfaced via the chankan claim window. |
 | Tsumo | When `calc.Analyze` on the bot's 14-tile hand (after drawing) returns a non-nil result |
 
-All probabilistic decisions SHALL use a PRNG seeded from the same seed as the wall, so games reproduce deterministically. Bot riichi tile-choice is deterministic (first scanned index) and SHALL NOT consume from the PRNG.
+All probabilistic decisions SHALL use a PRNG seeded from the same seed as the wall, so games reproduce deterministically. Bot riichi tile-choice and danger-aware discard tile-choice are deterministic and SHALL NOT consume from the PRNG.
 
-#### Scenario: Bot pons yakuhai always
+#### Scenario: Bot prefers genbutsu against riichi declarer
 
-- **GIVEN** a bot at seat North in round East has two East-wind tiles in hand
-- **WHEN** any opponent discards East
-- **THEN** the bot calls pon (probability 1.0)
+- **GIVEN** the human declared riichi and their pond contains `5p`
+- **AND** a bot's hand contains both `5p` (genbutsu) and `9m` (unknown danger)
+- **AND** the bot's isolation score for `9m` is higher than for `5p` in the absence of danger
+- **WHEN** the bot's `AwaitingDiscard` state is dispatched
+- **THEN** the bot discards `5p` (the genbutsu) — the danger penalty (-2000 × 2 = -4000) on `9m` outweighs the isolation difference
+
+#### Scenario: Bot prefers suji over unknown when no genbutsu available
+
+- **GIVEN** the human declared riichi and their pond contains `4p` (no other relevant tiles)
+- **AND** a bot's hand contains `1p` (suji per the 1↔4 rule), `7p` (suji per the 7↔4 rule), and `3m` (unknown)
+- **AND** none of these tiles are genbutsu (`4p` is in pond but the bot doesn't hold `4p`)
+- **WHEN** the bot's `AwaitingDiscard` state is dispatched
+- **THEN** the bot discards `1p` or `7p` (both danger 1) over `3m` (danger 2), provided isolation scores don't extreme-favor `3m`. The danger gap (-2000 vs -4000) dominates a typical isolation gap
+
+#### Scenario: Bot ron blocked by temporary furiten
+
+- **GIVEN** an opponent discarded a bot's machi tile T on a previous turn AND the bot did not ron on that discard
+- **AND** before the bot's next own draw, a different opponent discards T again
+- **WHEN** the bot's claim window evaluates ron
+- **THEN** the bot does NOT submit ron — `Game.IsFuriten(bot)` returns true via the temporary-furiten arm and the dispatcher passes
 
 #### Scenario: Bot does not chi from non-kamicha
 
 - **GIVEN** a bot has 4m + 5m and the discarded 6m
 - **WHEN** the discarder is not the bot's kamicha
 - **THEN** the bot does not call chi regardless of dice roll
-
-#### Scenario: Bot ron on yaku-bearing discard
-
-- **GIVEN** a bot's hand is tenpai with at least one possible yaku and an opponent discards a winning tile
-- **AND** `Game.IsFuriten(bot)` returns false
-- **WHEN** the claims window opens
-- **THEN** the bot calls ron
-
-#### Scenario: Bot ron blocked by permanent furiten
-
-- **GIVEN** a bot's hand is tenpai on tile T but the bot's own pond contains T
-- **WHEN** any opponent later discards T
-- **THEN** the bot does NOT call ron — `Game.IsFuriten(bot)` is true and the dispatcher passes instead
 
 #### Scenario: Bot tsumo on a yaku-bearing draw
 
@@ -146,31 +213,39 @@ All probabilistic decisions SHALL use a PRNG seeded from the same seed as the wa
 - **WHEN** the bot's `AwaitingDiscard` state is dispatched
 - **THEN** the bot submits `InputDiscard{Index: <first-tenpai-leaving-index>, Riichi: true}`
 
-#### Scenario: Bot does not declare riichi when open
+#### Scenario: Bot rons via chankan on human shouminkan
 
-- **GIVEN** a bot has previously called pon (one open meld)
-- **AND** the bot's post-discard hand is tenpai
-- **WHEN** the bot's `AwaitingDiscard` state is dispatched
-- **THEN** the bot does NOT declare riichi (open hands cannot riichi); the bot falls back to the isolation-heuristic discard
-
-#### Scenario: Bot does not declare riichi when wall has fewer than 4 tiles
-
-- **GIVEN** the live wall has 3 tiles remaining
-- **AND** a bot's post-discard hand is tenpai with concealed hand and ≥1000 score
-- **WHEN** the bot's `AwaitingDiscard` state is dispatched
-- **THEN** the bot does NOT declare riichi; the bot submits a regular `InputDiscard`
+- **GIVEN** the human has an open `MeldPon` for `5p` and declares `InputDeclareShouminkan{TileID: tile.P5}`
+- **AND** a bot is tenpai and not in furiten and the upgrade tile `5p` completes a yaku-bearing shape on the bot's hand
+- **WHEN** the chankan window resolves
+- **THEN** the bot submits `Claim{Kind: ClaimRon}` and the round terminates as `OutcomeRon{Winner: <bot>, Loser: <human>, Tile: 5p}` with `Chankan = true` in the winning context
 
 
 <!-- @trace
-source: add-smart-ai
+source: add-kan-support
 updated: 2026-05-02
 code:
-  - internal/game/bot.go
-  - internal/play/play.go
   - internal/game/turn.go
+  - internal/game/call.go
+  - internal/game/match.go
+  - internal/game/bot.go
+  - testdata/game/golden/seed-42.json
+  - internal/play/play.go
+  - internal/game/kan.go
+  - cmd/play.go
+  - internal/game/wall.go
+  - internal/game/state.go
+  - internal/play/kan_keys.go
+  - internal/game/payout.go
 tests:
-  - internal/game/bot_test.go
+  - internal/game/payout_test.go
   - internal/play/play_test.go
+  - internal/game/turn_test.go
+  - internal/game/wall_test.go
+  - internal/game/bot_test.go
+  - internal/game/kan_test.go
+  - internal/game/match_test.go
+  - internal/play/kan_keys_test.go
   - internal/game/furiten_test.go
 -->
 
@@ -208,8 +283,8 @@ The game state machine SHALL track and populate eight contextual flags whenever 
 | Ippatsu | Player wins within one turn after declaring riichi without any calls (own or opponents') intervening |
 | Haitei | Player wins by tsumo on the very last drawable tile of the live wall |
 | Houtei | Player wins by ron on the very last discard of a hand that exhausted the wall |
-| Rinshan | Player wins by tsumo on a tile drawn from the dead wall after declaring kan (always false in v1, kan deferred) |
-| Chankan | Player wins by ron on a tile that an opponent just declared as added-kan (always false in v1, kan deferred) |
+| Rinshan | Player wins by tsumo on a tile drawn from the dead wall after declaring kan (`Game.lastDrawWasRinshan[winner]` is true; cleared on next discard or call) |
+| Chankan | Player wins by ron on a tile that an opponent just declared as shouminkan (engine entered `StateAwaitingChankan` and the winner's claim was honored) |
 | DoubleRiichi | Player declared riichi on their first uninterrupted draw — no calls between deal and that draw |
 | Tenhou | Dealer wins on the initial 14-tile dealt hand (no draws, no discards happened yet) |
 | Chiihou | Non-dealer wins on their first draw with no calls intervening |
@@ -239,6 +314,48 @@ The game state machine SHALL track and populate eight contextual flags whenever 
 - **GIVEN** the wall is dealt and the dealer's 14-tile hand (13 dealt + 14th drawn first because dealer draws first) forms a winning shape
 - **WHEN** the dealer declares tsumo before discarding
 - **THEN** `Tenhou = true` and tenhou is in the yaku list (yakuman)
+
+#### Scenario: Rinshan tsumo on kan replacement draw
+
+- **GIVEN** a seat declares ankan and draws a rinshan replacement tile that completes their winning shape
+- **WHEN** the seat submits `InputDeclareTsumo`
+- **THEN** `Rinshan = true` is passed to `calc.Analyze` and rinshan kaihou is in the yaku list
+
+#### Scenario: Chankan ron on shouminkan upgrade tile
+
+- **GIVEN** an opponent declares shouminkan upgrading their open pon with the upgrade tile T
+- **AND** the active seat is tenpai on T and not in furiten
+- **WHEN** the active seat submits `Claim{Kind: ClaimRon}` in the chankan window
+- **THEN** `Chankan = true` is passed to `calc.Analyze` and chankan is in the yaku list
+
+
+<!-- @trace
+source: add-kan-support
+updated: 2026-05-02
+code:
+  - internal/game/turn.go
+  - internal/game/call.go
+  - internal/game/match.go
+  - internal/game/bot.go
+  - testdata/game/golden/seed-42.json
+  - internal/play/play.go
+  - internal/game/kan.go
+  - cmd/play.go
+  - internal/game/wall.go
+  - internal/game/state.go
+  - internal/play/kan_keys.go
+  - internal/game/payout.go
+tests:
+  - internal/game/payout_test.go
+  - internal/play/play_test.go
+  - internal/game/turn_test.go
+  - internal/game/wall_test.go
+  - internal/game/bot_test.go
+  - internal/game/kan_test.go
+  - internal/game/match_test.go
+  - internal/play/kan_keys_test.go
+  - internal/game/furiten_test.go
+-->
 
 ---
 ### Requirement: Human Hand Canonical Sort Invariant
@@ -475,38 +592,51 @@ tests:
 ---
 ### Requirement: Furiten Query
 
-The system SHALL expose `Game.IsFuriten(seat Seat) bool` returning true when ANY tile in the seat's own discard pond matches ANY tile ID in the seat's current machi (computed via `hand.Machi` on the seat's concealed hand at exactly 13 tiles). When the seat's hand is not exactly 13 tiles, `IsFuriten` SHALL return false (the machi is undefined for non-tenpai shapes). When the seat is in tenpai with no machi tiles in own pond, `IsFuriten` returns false. Permanent furiten only — temporary furiten across multiple opponent discards is out of scope for v1.
+The system SHALL expose `Game.IsFuriten(seat Seat) bool` returning true when EITHER permanent furiten OR temporary furiten is active for the seat. Permanent furiten holds when any tile in the seat's own discard pond matches a tile ID in the seat's current machi (computed via `hand.Machi` on the seat's concealed hand at exactly 13 tiles). Temporary furiten holds when an opponent has discarded a tile that completes a winning shape on the seat's hand (`hand.IsWinning(concealed + discard) == true`) since the seat's last own draw, AND the seat did not submit a ron claim for that discard. Temporary furiten clears when the seat takes their next own draw (`stepFromAwaitingDraw` resets the per-seat flag). When the seat's hand is not exactly 13 tiles, `IsFuriten` SHALL return false (the machi is undefined for non-tenpai shapes, and yaku-less winning shapes still trigger the temporary lockout but require a 13-tile concealed hand to be meaningful).
 
-#### Scenario: Furiten when machi tile is in own pond
+#### Scenario: Permanent furiten when machi tile is in own pond
 
-- **GIVEN** the human's 13-tile hand has machi `{4m, 7m}` and the human's discard pond contains `4m`
-- **WHEN** `Game.IsFuriten(Human)` is called
+- **GIVEN** the seat's 13-tile hand has machi `{4m, 7m}` and the seat's discard pond contains `4m`
+- **WHEN** `Game.IsFuriten(seat)` is called
 - **THEN** the result is `true`
 
-#### Scenario: Not furiten when machi tiles are absent from own pond
+#### Scenario: Not furiten when machi tiles are absent and no winning tile passed
 
-- **GIVEN** the human's 13-tile hand has machi `{4m, 7m}` and the human's discard pond contains `1z, 9m, 5p`
-- **WHEN** `Game.IsFuriten(Human)` is called
+- **GIVEN** the seat's 13-tile hand has machi `{4m, 7m}`, the seat's pond contains `1z, 9m, 5p`, and no opponent has discarded `4m` or `7m` since the seat's last draw
+- **WHEN** `Game.IsFuriten(seat)` is called
 - **THEN** the result is `false`
+
+#### Scenario: Temporary furiten when opponent discards machi tile and seat passes
+
+- **GIVEN** the seat's 13-tile hand wins on `5p` and the seat is NOT in permanent furiten
+- **AND** an opponent discards `5p` and the seat does not submit a ron claim
+- **WHEN** `Game.IsFuriten(seat)` is called before the seat's next draw
+- **THEN** the result is `true` (temporary furiten armed)
+
+#### Scenario: Temporary furiten clears on the seat's next own draw
+
+- **GIVEN** the seat is in temporary furiten (machi tile passed since last draw)
+- **WHEN** the seat takes their next own draw via `stepFromAwaitingDraw`
+- **THEN** `Game.IsFuriten(seat)` returns false (temporary flag reset; permanent furiten still applies if relevant)
 
 #### Scenario: Furiten query on non-tenpai hand returns false
 
-- **GIVEN** the human's 13-tile hand has shanten ≥1 (machi is empty)
-- **WHEN** `Game.IsFuriten(Human)` is called
+- **GIVEN** the seat's 13-tile hand has shanten ≥1 (machi is empty)
+- **WHEN** `Game.IsFuriten(seat)` is called
 - **THEN** the result is `false`
 
 
 <!-- @trace
-source: add-human-agari
+source: add-bot-defense
 updated: 2026-05-02
 code:
+  - internal/game/bot.go
   - internal/game/turn.go
   - internal/play/play.go
-  - internal/game/state.go
 tests:
-  - internal/play/play_test.go
+  - internal/game/bot_test.go
   - internal/game/furiten_test.go
-  - internal/game/riichi_test.go
+  - internal/play/play_test.go
 -->
 
 ---
@@ -555,4 +685,47 @@ tests:
   - internal/game/bot_test.go
   - internal/play/play_test.go
   - internal/game/furiten_test.go
+-->
+
+---
+### Requirement: Per-Hand Dealer-Relative Seat Wind
+
+The system SHALL compute each seat's wind dealer-relative on a per-hand basis rather than from a fixed `Seat → wind` mapping. The system SHALL expose `Game.SeatWindFor(seat Seat) uint8` returning `tile.EastWind + uint8((seat - dealer + 4) % 4)`. Engine code paths that populate `calc.Context.SeatWind` SHALL call `Game.SeatWindFor(winner)` rather than the deprecated `Seat.SeatWind()` method. The legacy `Seat.SeatWind()` MUST continue to exist for the standalone `mahjong calc` CLI, where the user supplies seat winds directly. The `Game` constructor variant `NewWithDealer(seed int64, dealer Seat, roundWind uint8) *Game` SHALL accept the dealer seat and round wind explicitly; `New(seed int64) *Game` SHALL delegate to `NewWithDealer(seed, SeatEast, tile.EastWind)` for backwards compatibility.
+
+#### Scenario: East-1 hand pins seat winds to seat IDs
+
+- **GIVEN** `g := game.NewWithDealer(7, SeatEast, tile.EastWind)`
+- **WHEN** the caller queries `g.SeatWindFor(SeatEast)`, `g.SeatWindFor(SeatSouth)`, `g.SeatWindFor(SeatWest)`, `g.SeatWindFor(SeatNorth)`
+- **THEN** the returned values are `EastWind`, `SouthWind`, `WestWind`, `NorthWind` (matching the legacy `Seat.SeatWind()` exactly)
+
+#### Scenario: East-2 hand rotates seat winds dealer-relative
+
+- **GIVEN** `g := game.NewWithDealer(7, SeatSouth, tile.EastWind)` (East-2 with dealer rotated to SeatSouth)
+- **WHEN** the caller queries `g.SeatWindFor(SeatSouth)`, `g.SeatWindFor(SeatWest)`, `g.SeatWindFor(SeatNorth)`, `g.SeatWindFor(SeatEast)`
+- **THEN** the returned values are `EastWind`, `SouthWind`, `WestWind`, `NorthWind` (the dealer is always East-wind regardless of physical seat)
+
+#### Scenario: contextForWin reads seat wind via SeatWindFor
+
+- **GIVEN** a game at East-2 (dealer = `SeatSouth`) where `SeatNorth` (now West-wind for this hand) wins by tsumo
+- **WHEN** `Game.contextForWin(SeatNorth, true)` is invoked
+- **THEN** the returned `calc.Context.SeatWind` is `tile.WestWind` (not `tile.NorthWind`)
+
+<!-- @trace
+source: add-multi-round
+updated: 2026-05-02
+code:
+  - testdata/game/golden/seed-42.json
+  - cmd/play.go
+  - internal/play/play.go
+  - internal/game/match.go
+  - internal/game/bot.go
+  - internal/game/turn.go
+  - internal/game/payout.go
+tests:
+  - internal/game/bot_test.go
+  - internal/game/match_test.go
+  - internal/game/turn_test.go
+  - internal/play/play_test.go
+  - internal/game/furiten_test.go
+  - internal/game/payout_test.go
 -->
