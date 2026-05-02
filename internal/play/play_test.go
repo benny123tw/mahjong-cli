@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 
 	"github.com/benny123tw/mahjong-cli/internal/game"
 	"github.com/benny123tw/mahjong-cli/internal/riichi/calc"
@@ -1259,5 +1260,136 @@ func TestDispatchBotDiscardUsesPushModeAtLowShanten(t *testing.T) {
 			got,
 			wantTile,
 		)
+	}
+}
+
+func TestRenderHandIncludesOpenMeldsWithSeatMarkers(t *testing.T) {
+	g := game.New(7)
+	// 13-tile concealed hand (any sensible shape).
+	g.SetTestHand(game.SeatSouth, []tile.Tile{
+		{ID: tile.M1},
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.P4},
+		{ID: tile.P5},
+		{ID: tile.P6},
+		{ID: tile.S7},
+		{ID: tile.S8},
+		{ID: tile.S9},
+		{ID: tile.M4},
+		{ID: tile.M5},
+		{ID: tile.SouthWind},
+		{ID: tile.SouthWind},
+	})
+	g.SetTestMeld(game.SeatSouth, game.Meld{
+		Kind:  game.MeldPon,
+		Tiles: []tile.Tile{{ID: tile.P5}, {ID: tile.P5}, {ID: tile.P5}},
+		From:  game.SeatEast,
+	})
+	g.SetTestMeld(game.SeatSouth, game.Meld{
+		Kind:  game.MeldChi,
+		Tiles: []tile.Tile{{ID: tile.M2}, {ID: tile.M3}, {ID: tile.M4}},
+		From:  game.SeatWest,
+	})
+	g.SetTestMeld(game.SeatSouth, game.Meld{
+		Kind:    game.MeldKan,
+		KanKind: game.KanAnkan,
+		Tiles: []tile.Tile{
+			{ID: tile.EastWind},
+			{ID: tile.EastWind},
+			{ID: tile.EastWind},
+			{ID: tile.EastWind},
+		},
+	})
+
+	m := NewWithGame(UnicodeRenderer{}, g)
+	out := m.renderHand()
+
+	if !strings.Contains(out, "[E]") {
+		t.Errorf("renderHand output missing [E] marker for pon-from-East. Output:\n%s", out)
+	}
+	if !strings.Contains(out, "[W]") {
+		t.Errorf("renderHand output missing [W] marker for chi-from-West. Output:\n%s", out)
+	}
+	if !strings.Contains(out, "[A]") {
+		t.Errorf("renderHand output missing [A] marker for ankan. Output:\n%s", out)
+	}
+}
+
+func TestRenderHandPreservesByteIdenticalOutputWhenNoMelds(t *testing.T) {
+	g := game.New(7)
+	g.SetTestHand(game.SeatSouth, []tile.Tile{
+		{ID: tile.M1},
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.P4},
+		{ID: tile.P5},
+		{ID: tile.P6},
+		{ID: tile.S7},
+		{ID: tile.S8},
+		{ID: tile.S9},
+		{ID: tile.M4},
+		{ID: tile.M5},
+		{ID: tile.SouthWind},
+		{ID: tile.SouthWind},
+	})
+
+	m := NewWithGame(UnicodeRenderer{}, g)
+	out := m.renderHand()
+
+	for _, marker := range []string{"[E]", "[S]", "[W]", "[N]", "[A]"} {
+		if strings.Contains(out, marker) {
+			t.Errorf(
+				"renderHand output contains %q with no melds present. Output:\n%s",
+				marker,
+				out,
+			)
+		}
+	}
+}
+
+func TestRenderHandWrapsMeldsWhenRowExceeds80Columns(t *testing.T) {
+	g := game.New(7)
+	g.SetTestHand(game.SeatSouth, []tile.Tile{
+		{ID: tile.M1},
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.P4},
+		{ID: tile.P5},
+		{ID: tile.P6},
+		{ID: tile.S7},
+		{ID: tile.S8},
+		{ID: tile.S9},
+		{ID: tile.M4},
+		{ID: tile.M5},
+		{ID: tile.SouthWind},
+		{ID: tile.SouthWind},
+	})
+	for _, id := range []uint8{tile.EastWind, tile.SouthWind, tile.WestWind, tile.NorthWind} {
+		g.SetTestMeld(game.SeatSouth, game.Meld{
+			Kind:    game.MeldKan,
+			KanKind: game.KanAnkan,
+			Tiles:   []tile.Tile{{ID: id}, {ID: id}, {ID: id}, {ID: id}},
+		})
+	}
+
+	m := NewWithGame(UnicodeRenderer{}, g)
+	out := m.renderHand()
+
+	if !strings.Contains(out, "\n") {
+		t.Fatalf(
+			"renderHand with 4 ankans + 13 concealed should wrap onto a second line. Output:\n%s",
+			out,
+		)
+	}
+	for line := range strings.SplitSeq(out, "\n") {
+		if w := lipgloss.Width(line); w > targetWidth {
+			t.Errorf(
+				"rendered line width %d exceeds targetWidth %d. Line: %q",
+				w,
+				targetWidth,
+				line,
+			)
+		}
 	}
 }

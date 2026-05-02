@@ -1164,7 +1164,67 @@ func (m Model) renderHand() string {
 		}
 		cells = append(cells, tileBlock)
 	}
-	return lipgloss.JoinHorizontal(lipgloss.Top, cells...)
+	concealed := lipgloss.JoinHorizontal(lipgloss.Top, cells...)
+	melds := m.renderOpenMelds()
+	if melds == "" {
+		return concealed
+	}
+	// Layout: 2-tile-width gap between concealed and melds. When the combined
+	// width exceeds 80, stack melds onto a second line below the concealed row.
+	gap := m.handGap() + m.handGap()
+	combined := lipgloss.JoinHorizontal(lipgloss.Top, concealed, gap, melds)
+	if lipgloss.Width(combined) > targetWidth {
+		return lipgloss.JoinVertical(lipgloss.Top, concealed, melds)
+	}
+	return combined
+}
+
+// renderOpenMelds renders the human's called melds (pon, chi, ankan, minkan,
+// shouminkan) as a horizontally-joined block, prefixed with a seat-source
+// marker per meld: [E]/[S]/[W]/[N] for melds called from a discarder seat,
+// [A] for ankan (concealed kan, no source seat). Returns "" when the human
+// has no open melds — preserving byte-identical pre-change rendering.
+func (m Model) renderOpenMelds() string {
+	if m.game == nil {
+		return ""
+	}
+	melds := m.game.Melds(HumanSeat)
+	if len(melds) == 0 {
+		return ""
+	}
+	blocks := make([]string, 0, len(melds)*2)
+	for i, meld := range melds {
+		if i > 0 {
+			blocks = append(blocks, m.handGap())
+		}
+		marker := openMeldMarker(meld)
+		blocks = append(blocks, lipgloss.NewStyle().Render(marker+" "))
+		for _, t := range meld.Tiles {
+			tileLines := m.renderer.Tile(t)
+			blocks = append(blocks, strings.Join(tileLines, "\n"))
+		}
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top, blocks...)
+}
+
+// openMeldMarker returns the bracketed seat-source marker for an open meld.
+// Ankan returns "[A]" (no source seat); every other kind returns the From
+// seat letter.
+func openMeldMarker(meld game.Meld) string {
+	if meld.Kind == game.MeldKan && meld.KanKind == game.KanAnkan {
+		return "[A]"
+	}
+	switch meld.From {
+	case game.SeatEast:
+		return "[E]"
+	case game.SeatSouth:
+		return "[S]"
+	case game.SeatWest:
+		return "[W]"
+	case game.SeatNorth:
+		return "[N]"
+	}
+	return "[?]"
 }
 
 // shouldShowDrawnTileGap reports whether the drawn-tile gap separator should
