@@ -7,6 +7,8 @@ import (
 	tea "charm.land/bubbletea/v2"
 
 	"github.com/benny123tw/mahjong-cli/internal/game"
+	"github.com/benny123tw/mahjong-cli/internal/riichi/calc"
+	"github.com/benny123tw/mahjong-cli/internal/riichi/score"
 	"github.com/benny123tw/mahjong-cli/internal/riichi/tile"
 )
 
@@ -737,6 +739,55 @@ func TestBotDispatchPonOnYakuhaiDiscard(t *testing.T) {
 	}
 }
 
+func TestBotDispatchAvoidsGenbutsuAgainstRiichiDeclarer(t *testing.T) {
+	// The human (South) is in riichi with 5p in their pond. SeatNorth is
+	// active and holds 5p (genbutsu) plus four isolated honors (East,
+	// South, West, Haku) which would each score 1000 isolation — vastly
+	// higher than the heavily-connected 5p (~99). Without danger awareness
+	// the bot would discard a honor; with the K=2000 penalty on unknown
+	// tiles the genbutsu wins.
+	g := game.New(7)
+	g.SetTestRiichiDeclared(game.SeatSouth, true)
+	g.SetTestPond(game.SeatSouth, []tile.Tile{{ID: tile.P5}})
+	g.SetTestHand(game.SeatNorth, []tile.Tile{
+		{ID: tile.M3},
+		{ID: tile.M4},
+		{ID: tile.P2},
+		{ID: tile.P3},
+		{ID: tile.P5},
+		{ID: tile.S2},
+		{ID: tile.S3},
+		{ID: tile.S4},
+		{ID: tile.S6},
+		{ID: tile.S7},
+		{ID: tile.EastWind},
+		{ID: tile.SouthWind},
+		{ID: tile.WestWind},
+		{ID: tile.Haku},
+	})
+	g.SetTestState(game.StateAwaitingDiscard{Player: game.SeatNorth})
+
+	m := NewWithGame(UnicodeRenderer{}, g)
+	updated, _ := m.Update(BotTickMsg{})
+	mu := updated.(Model)
+
+	// After dispatch, the discard sits at the back of North's pond.
+	northPond := mu.Pond(game.SeatNorth)
+	if len(northPond) == 0 {
+		t.Fatalf(
+			"North's pond is empty after BotTickMsg; bot did not discard. State: %T",
+			mu.GameState(),
+		)
+	}
+	got := northPond[len(northPond)-1]
+	if got.ID != tile.P5 {
+		t.Errorf(
+			"bot discarded %s, want 5p (the genbutsu). Without danger awareness an honor would have won on isolation; the 2000K penalty must dominate.",
+			got,
+		)
+	}
+}
+
 func TestBotDispatchDoesNotSubmitForHuman(t *testing.T) {
 	g := game.New(7)
 	// Plant the human at a yaku-bearing winning shape on the East discard.
@@ -757,5 +808,136 @@ func TestBotDispatchDoesNotSubmitForHuman(t *testing.T) {
 				"bot dispatcher auto-submitted ron for the human (winner=South); the human's claim must come from their own keypress",
 			)
 		}
+	}
+}
+
+func TestStatusBarReflectsMatchState(t *testing.T) {
+	m := game.NewMatch(7)
+	m.SetTestScore(game.SeatSouth, 27300)
+	m.SetTestRiichiSticks(2)
+	m.SetTestHonba(1)
+	m.SetTestHandIndex(1) // East 2
+
+	model := NewWithMatch(UnicodeRenderer{}, m)
+	status := model.View().Content
+
+	if !strings.Contains(status, "East 2") {
+		t.Errorf("status bar does not contain 'East 2'. View:\n%s", status)
+	}
+	if !strings.Contains(status, "Honba 1") {
+		t.Errorf("status bar does not contain 'Honba 1'. View:\n%s", status)
+	}
+	if !strings.Contains(status, "Riichi 2") {
+		t.Errorf("status bar does not contain 'Riichi 2'. View:\n%s", status)
+	}
+	if !strings.Contains(status, "27300") {
+		t.Errorf("status bar does not contain human score 27300. View:\n%s", status)
+	}
+}
+
+func TestEndOfHandAckPanelOnRoundOver(t *testing.T) {
+	m := game.NewMatch(7)
+	cur := m.CurrentGame()
+	// Force the current game into StateRoundOver with a non-dealer ron outcome.
+	cur.SetTestState(game.StateRoundOver{Outcome: game.OutcomeRon{
+		Winner: game.SeatSouth,
+		Loser:  game.SeatEast,
+		Tile:   tile.Tile{ID: tile.S7},
+		Result: &calc.Result{Award: score.Award{Total: 1000, Base: 240}},
+	}})
+
+	model := NewWithMatch(UnicodeRenderer{}, m)
+	updated, _ := model.Update(BotTickMsg{})
+	mu := updated.(Model)
+
+	if mu.pendingTransition == nil {
+		t.Fatalf("pendingTransition is nil after RoundOver tick; expected ack to fire")
+	}
+	view := mu.View().Content
+	if !strings.Contains(view, "ron") {
+		t.Errorf("ack panel view does not mention 'ron'. View:\n%s", view)
+	}
+	if !strings.Contains(view, "South") || !strings.Contains(view, "East") {
+		t.Errorf("ack panel view missing seat labels. View:\n%s", view)
+	}
+}
+
+func TestKeypressOnAckAdvancesToNextHand(t *testing.T) {
+	m := game.NewMatch(7)
+	cur := m.CurrentGame()
+	cur.SetTestState(game.StateRoundOver{Outcome: game.OutcomeRon{
+		Winner: game.SeatSouth,
+		Loser:  game.SeatEast,
+		Tile:   tile.Tile{ID: tile.S7},
+		Result: &calc.Result{Award: score.Award{Total: 1000, Base: 240}},
+	}})
+
+	model := NewWithMatch(UnicodeRenderer{}, m)
+	// First Update fires AdvanceFromOutcome and sets pendingTransition.
+	model1, _ := model.Update(BotTickMsg{})
+	mu1 := model1.(Model)
+	if mu1.pendingTransition == nil {
+		t.Fatalf("first tick did not set pendingTransition")
+	}
+	// Second Update with a keypress clears the pending transition.
+	model2, _ := mu1.Update(tea.KeyPressMsg{Code: ' '})
+	mu2 := model2.(Model)
+
+	if mu2.pendingTransition != nil {
+		t.Errorf("pendingTransition not cleared after keypress")
+	}
+	if mu2.GameState() == nil {
+		t.Errorf("GameState() is nil after advance; expected the new hand's state")
+	}
+	// The match should now be at East 2, dealer = SeatSouth.
+	if m.HandIndex() != 1 {
+		t.Errorf("after non-renchan ron, HandIndex = %d, want 1", m.HandIndex())
+	}
+	if m.Dealer() != game.SeatSouth {
+		t.Errorf("after rotation, Dealer = %d, want SeatSouth", m.Dealer())
+	}
+}
+
+func TestStandingsScreenOnHanchanCompletion(t *testing.T) {
+	m := game.NewMatch(7)
+	m.SetTestHandIndex(7) // South 4
+	m.SetTestScore(game.SeatEast, 26500)
+	m.SetTestScore(game.SeatSouth, 24500)
+	m.SetTestScore(game.SeatWest, 27500)
+	m.SetTestScore(game.SeatNorth, 21500)
+	dealer := m.Dealer()
+	nonDealer := dealer.Next()
+	o := game.OutcomeRon{
+		Winner: nonDealer,
+		Loser:  dealer,
+		Tile:   tile.Tile{ID: tile.S7},
+		Result: &calc.Result{Award: score.Award{Total: 1000, Base: 240}},
+	}
+	if _, err := m.AdvanceFromOutcome(o); err != nil {
+		t.Fatalf("AdvanceFromOutcome err: %v", err)
+	}
+	if !m.IsFinished() {
+		t.Fatalf("precondition: match should be finished at South 4 with non-renchan outcome")
+	}
+
+	model := NewWithMatch(UnicodeRenderer{}, m)
+	view := model.View().Content
+
+	if !strings.Contains(view, "Hanchan complete") {
+		t.Errorf("standings view missing 'Hanchan complete' header. View:\n%s", view)
+	}
+	for _, label := range []string{"East", "South", "West", "North"} {
+		if !strings.Contains(view, label) {
+			t.Errorf("standings view missing seat %q. View:\n%s", label, view)
+		}
+	}
+	if !strings.Contains(view, "hanchan-complete") {
+		t.Errorf("standings view missing reason 'hanchan-complete'. View:\n%s", view)
+	}
+
+	// Quit key returns tea.Quit.
+	_, cmd := model.Update(tea.KeyPressMsg{Code: 'q'})
+	if cmd == nil {
+		t.Errorf("standings 'q' returned nil cmd, want tea.Quit")
 	}
 }

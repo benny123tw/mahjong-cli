@@ -49,10 +49,13 @@ const HumanSeat = game.SeatSouth
 
 // Model holds play-screen state. When a *game.Game pointer is supplied via
 // NewWithGame, hand and pond data flow from there; the legacy New(renderer)
-// path keeps the static fixture so old callers continue to render.
+// path keeps the static fixture so old callers continue to render. When a
+// *game.Match is supplied via NewWithMatch, the per-hand *Game is read
+// through the match (and replaced after each end-of-hand transition).
 type Model struct {
-	game     *game.Game // nil for legacy fixture mode
-	hand     hand.Hand  // fixture fallback
+	match    *game.Match // nil when running against a single Game directly
+	game     *game.Game  // nil for legacy fixture mode
+	hand     hand.Hand   // fixture fallback
 	cursor   int
 	width    int
 	height   int
@@ -62,6 +65,12 @@ type Model struct {
 	peekShanten int
 	peekMachi   []uint8
 	peekHandLen int
+
+	// pendingTransition holds the just-applied AdvanceFromOutcome result
+	// when the player is reviewing the end-of-hand summary. While non-nil,
+	// View renders an ack panel in place of the normal play layout, and
+	// Update treats any keypress as "advance to next hand".
+	pendingTransition *game.TransitionResult
 
 	// transient feedback strings shown in the footer.
 	ackKey  string
@@ -84,6 +93,18 @@ func New(renderer Renderer) Model {
 func NewWithGame(renderer Renderer, g *game.Game) Model {
 	return Model{
 		game:        g,
+		renderer:    renderer,
+		peekShanten: peekUnknown,
+	}
+}
+
+// NewWithMatch constructs a Model bound to a hanchan match. The active
+// per-hand *Game is read through the match and is replaced after each
+// end-of-hand transition. This is the canonical entry point for `mahjong play`.
+func NewWithMatch(renderer Renderer, m *game.Match) Model {
+	return Model{
+		match:       m,
+		game:        m.CurrentGame(),
 		renderer:    renderer,
 		peekShanten: peekUnknown,
 	}
@@ -148,8 +169,39 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		return m, nil
 	case BotTickMsg:
+		// Drop bot ticks while reviewing the ack panel. The keypress on the
+		// panel will resume the loop.
+		if m.pendingTransition != nil {
+			return m, nil
+		}
+		m = m.maybeAdvanceMatch()
+		if m.pendingTransition != nil {
+			return m, nil
+		}
 		return m.handleBotTick()
 	case tea.KeyPressMsg:
+		// Standings screen: only quit keys are honored.
+		if m.match != nil && m.match.IsFinished() {
+			if k := msg.String(); k == "q" || k == "ctrl+c" {
+				return m, tea.Quit
+			}
+			return m, nil
+		}
+		// Ack panel: any keypress advances to the next hand.
+		if m.pendingTransition != nil {
+			m.pendingTransition = nil
+			if m.match != nil {
+				m.game = m.match.CurrentGame()
+			}
+			m.peekShanten = peekUnknown
+			m.peekMachi = nil
+			m = m.autoDrawHuman()
+			return m, m.maybeBotTickCmd()
+		}
+		m = m.maybeAdvanceMatch()
+		if m.pendingTransition != nil {
+			return m, nil
+		}
 		updated, cmd := m.handleKey(msg.String())
 		if cmd != nil {
 			return updated, cmd
@@ -159,6 +211,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return mu, mu.maybeBotTickCmd()
 	}
 	return m, nil
+}
+
+// maybeAdvanceMatch checks whether the active hand has terminated and, if
+// so, applies the outcome to the bound Match. The resulting TransitionResult
+// is stored as a pending acknowledgement so the TUI can render the
+// end-of-hand summary before the next hand starts.
+func (m Model) maybeAdvanceMatch() Model {
+	if m.match == nil || m.game == nil || m.pendingTransition != nil {
+		return m
+	}
+	if m.match.IsFinished() {
+		return m
+	}
+	st, ok := m.game.State().(game.StateRoundOver)
+	if !ok {
+		return m
+	}
+	tr, err := m.match.AdvanceFromOutcome(st.Outcome)
+	if err != nil {
+		return m
+	}
+	m.pendingTransition = &tr
+	return m
 }
 
 // autoDrawHuman fires a Draw input automatically when state lands on
@@ -197,6 +272,21 @@ func (m Model) isBotTurn() bool {
 		return s.Player != HumanSeat
 	case game.StateAwaitingDiscard:
 		return s.Player != HumanSeat
+	case game.StateAwaitingChankan:
+		// When the human is the shouminkan declarer, only bots can ron
+		// (the declarer can't ron on their own upgrade tile). When a bot
+		// is the declarer, defer to the human only when their hand could
+		// produce a chankan ron.
+		if s.Declarer == HumanSeat {
+			return true
+		}
+		humanHand := m.game.Hand(HumanSeat)
+		concealed := append([]tile.Tile{}, humanHand...)
+		concealed = append(concealed, s.UpgradeTile)
+		if hand.IsWinning(hand.Hand{Concealed: concealed}) && !m.game.IsFuriten(HumanSeat) {
+			return false
+		}
+		return true
 	case game.StateAwaitingClaims:
 		// In claims state, defer to the human only when they have a legal
 		// pon or chi to consider. Otherwise auto-tick: bots auto-pass in v1
@@ -227,9 +317,41 @@ func (m Model) handleBotTick() (tea.Model, tea.Cmd) {
 		m.dispatchBotDiscard(s.Player)
 	case game.StateAwaitingClaims:
 		m.dispatchBotClaims(s)
+	case game.StateAwaitingChankan:
+		m.dispatchBotChankan(s)
 	}
 	m = m.autoDrawHuman()
 	return m, m.maybeBotTickCmd()
+}
+
+// dispatchBotChankan evaluates ron for each non-declarer bot during a
+// chankan window. Pon/chi are not legal here. Each bot considers whether
+// the upgrade tile completes a yaku-bearing winning shape on their hand;
+// the chankan flag flips on automatically inside `Game.contextForWin`.
+func (m Model) dispatchBotChankan(cs game.StateAwaitingChankan) {
+	claims := map[game.Seat]game.Claim{}
+	for _, seat := range []game.Seat{game.SeatEast, game.SeatSouth, game.SeatWest, game.SeatNorth} {
+		if seat == cs.Declarer || seat == HumanSeat {
+			continue
+		}
+		hd := m.game.Hand(seat)
+		concealed := append([]tile.Tile{}, hd...)
+		concealed = append(concealed, cs.UpgradeTile)
+		// Augment the bot context so the chankan flag is observed during
+		// preflight evaluation. The engine's contextForWin will set it
+		// definitively when the round ends.
+		ctx := m.botContextForWin(seat)
+		ctx.Chankan = true
+		if calc.Analyze(hand.Hand{
+			Concealed: concealed,
+			Winning:   cs.UpgradeTile,
+			IsTsumo:   false,
+			Open:      m.game.IsHandOpen(seat),
+		}, ctx) != nil && !m.game.IsFuriten(seat) {
+			claims[seat] = game.Claim{Kind: game.ClaimRon}
+		}
+	}
+	_, _ = m.game.Step(game.InputResolveClaims{Claims: claims})
 }
 
 // dispatchBotDiscard runs the bot's discard-phase decisions in priority
@@ -269,8 +391,44 @@ func (m Model) dispatchBotDiscard(seat game.Seat) {
 		return
 	}
 
-	idx := max(bot.PickDiscard(hd), 0)
+	danger := m.assembleDangerMap(seat, hd)
+	idx := max(bot.DangerAwarePickDiscard(hd, danger), 0)
 	_, _ = m.game.Step(game.InputDiscard{Index: idx})
+}
+
+// assembleDangerMap builds the per-tile-ID danger scores against every
+// riichi-declared opponent of `seat`. Genbutsu (tile-ID in opponent's pond)
+// scores 0; suji-safe (per the rank pair table — see game.SujiSafe) scores
+// 1; tiles absent from the map default to 2 inside DangerAwarePickDiscard.
+// Multi-riichi: min across all declarers — the safest classification wins.
+//
+// Returns an empty map (not nil) when no opponent is in riichi; the bot's
+// PickDiscard fallback fires for the empty case in DangerAwarePickDiscard.
+func (m Model) assembleDangerMap(seat game.Seat, hand []tile.Tile) map[uint8]int {
+	danger := map[uint8]int{}
+	setDanger := func(id uint8, level int) {
+		if cur, ok := danger[id]; !ok || level < cur {
+			danger[id] = level
+		}
+	}
+	for _, opp := range []game.Seat{game.SeatEast, game.SeatSouth, game.SeatWest, game.SeatNorth} {
+		if opp == seat {
+			continue
+		}
+		if !m.game.IsRiichiDeclared(opp) {
+			continue
+		}
+		oppPond := m.game.Discards(opp)
+		for _, t := range oppPond {
+			setDanger(t.ID, 0)
+		}
+		for _, c := range hand {
+			if game.SujiSafe(oppPond, c) {
+				setDanger(c.ID, 1)
+			}
+		}
+	}
+	return danger
 }
 
 // dispatchBotClaims iterates non-discarder bot seats and collects each
@@ -302,7 +460,7 @@ func (m Model) dispatchBotClaims(cs game.StateAwaitingClaims) {
 
 		// Pon: ShouldPon checks CanPon internally; we feed it the yakuhai
 		// flag and the bot's current shanten.
-		isYakuhai := game.IsYakuhai(cs.Discard.ID, m.game.RoundWind(), seat.SeatWind())
+		isYakuhai := game.IsYakuhai(cs.Discard.ID, m.game.RoundWind(), m.game.SeatWindFor(seat))
 		shanten := hand.Shanten(hand.Hand{Concealed: hd})
 		if bot.ShouldPon(hd, cs.Discard, isYakuhai, shanten) {
 			claims[seat] = game.Claim{Kind: game.ClaimPon}
@@ -324,10 +482,12 @@ func (m Model) dispatchBotClaims(cs game.StateAwaitingClaims) {
 // botContextForWin builds a calc.Context for a bot win evaluation. Mirrors
 // Game.contextForWin but for a non-human seat without exposing the engine's
 // full per-seat riichi state — tsumo/ron pre-flights only need the basic
-// scoring context (calc.Analyze rejects yakuless wins regardless).
+// scoring context (calc.Analyze rejects yakuless wins regardless). Seat
+// wind is read dealer-relative via Game.SeatWindFor so per-hand rotations
+// produce the correct yakuhai/seat-wind context.
 func (m Model) botContextForWin(seat game.Seat) calc.Context {
 	return calc.Context{
-		SeatWind:  seat.SeatWind(),
+		SeatWind:  m.game.SeatWindFor(seat),
 		RoundWind: m.game.RoundWind(),
 		Dora:      m.game.DoraIndicators(),
 	}
@@ -367,8 +527,7 @@ func (m Model) handleKey(key string) (tea.Model, tea.Cmd) {
 	case "c":
 		return m.handleChi(), nil
 	case "k":
-		m.ackText = "kan: not supported in v1 (deferred to add-kan-support)"
-		m.ackKey = key
+		return m.handleKan(), nil
 	}
 	return m, nil
 }
@@ -522,7 +681,7 @@ func (m Model) handleRon() Model {
 		Open:      m.game.IsHandOpen(HumanSeat),
 	}
 	if calc.Analyze(h, calc.Context{
-		SeatWind:  HumanSeat.SeatWind(),
+		SeatWind:  m.game.SeatWindFor(HumanSeat),
 		RoundWind: m.game.RoundWind(),
 		Dora:      m.game.DoraIndicators(),
 	}) == nil {
@@ -600,6 +759,7 @@ func (m Model) RenderCallFooter() string {
 	humanHand := m.game.Hand(HumanSeat)
 	canPon := game.CanPon(humanHand, cs.Discard)
 	canChi := len(game.CanChi(humanHand, cs.Discard, cs.Discarder, HumanSeat)) > 0
+	canKan := game.CanKan(humanHand, cs.Discard)
 
 	// Compute ron legality: the hand must form a yaku-bearing winning shape
 	// on `concealed + discard`, and the human must NOT be in permanent
@@ -613,7 +773,7 @@ func (m Model) RenderCallFooter() string {
 		IsTsumo:   false,
 		Open:      m.game.IsHandOpen(HumanSeat),
 	}, calc.Context{
-		SeatWind:  HumanSeat.SeatWind(),
+		SeatWind:  m.game.SeatWindFor(HumanSeat),
 		RoundWind: m.game.RoundWind(),
 		Dora:      m.game.DoraIndicators(),
 	}) != nil
@@ -631,12 +791,10 @@ func (m Model) RenderCallFooter() string {
 	if furitenBlock {
 		ronLabel = "[R]on (furiten)"
 	}
-	// [K]an stays a hardcoded placeholder until kan support lands. The
-	// asymmetry is intentional: ron logic is wired here, kan is not.
 	parts := []string{
 		render("[P]on", canPon),
 		render("[C]hi", canChi),
-		render("[K]an (greyed)", false),
+		render("[K]an", canKan),
 		render(ronLabel, canRon),
 		liveKeyStyle.Render("[Space] Pass"),
 	}
@@ -656,12 +814,151 @@ func (m Model) View() tea.View {
 		return tea.NewView(notice)
 	}
 
-	body := m.renderLayout()
+	var body string
+	switch {
+	case m.match != nil && m.match.IsFinished():
+		body = m.renderStandings()
+	case m.pendingTransition != nil:
+		body = m.renderTransitionAck()
+	default:
+		body = m.renderLayout()
+	}
 
 	if m.width >= targetWidth && m.height >= targetHeight {
 		body = lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, body)
 	}
 	return tea.NewView(body)
+}
+
+// scoreSuffix returns " · <score>" when a Match is bound, otherwise empty.
+func (m Model) scoreSuffix(s game.Seat) string {
+	if m.match == nil {
+		return ""
+	}
+	return fmt.Sprintf(" · %d", m.match.Scores()[s])
+}
+
+// renderTransitionAck draws the end-of-hand summary panel: outcome line,
+// per-seat point deltas, post-payout totals, and (on renchan) the new
+// honba count. Returns to the play layout when any keypress is received.
+func (m Model) renderTransitionAck() string {
+	tr := m.pendingTransition
+	if tr == nil {
+		return ""
+	}
+	header := "Hand complete"
+	if m.game != nil {
+		if st, ok := m.game.State().(game.StateRoundOver); ok {
+			header = describeOutcome(st.Outcome)
+		}
+	}
+	rows := []string{
+		statusStyle.Render(header),
+		"",
+		labelStyle.Render(formatDeltasRow(tr.Deltas, tr.NewTotals)),
+		"",
+	}
+	if tr.Renchan {
+		rows = append(rows, labelStyle.Render(fmt.Sprintf("Renchan — Honba %d", tr.NewHonba)))
+	} else if tr.MatchOutcome == nil {
+		rows = append(rows, labelStyle.Render(fmt.Sprintf("Next hand: index %d", tr.NewHandIndex)))
+	}
+	rows = append(rows, "", liveKeyStyle.Render("[any key] Continue"))
+	return strings.Join(rows, "\n")
+}
+
+// renderStandings draws the end-of-match standings: four rows sorted by
+// score descending, the match-end reason, and a quit prompt.
+func (m Model) renderStandings() string {
+	if m.match == nil {
+		return ""
+	}
+	scores := m.match.Scores()
+	type entry struct {
+		seat   game.Seat
+		points int
+	}
+	rows := []entry{}
+	for s := range game.Seat(4) {
+		rows = append(rows, entry{seat: s, points: scores[s]})
+	}
+	for i := range rows {
+		for j := i + 1; j < len(rows); j++ {
+			if rows[j].points > rows[i].points {
+				rows[i], rows[j] = rows[j], rows[i]
+			}
+		}
+	}
+	out := []string{statusStyle.Render("Hanchan complete")}
+	for _, r := range rows {
+		out = append(out, labelStyle.Render(fmt.Sprintf("  %s  %6d", seatLabel(r.seat), r.points)))
+	}
+	out = append(out, "")
+	if oc := m.match.FinalOutcome(); oc != nil {
+		reason := oc.Reason
+		if oc.Reason == "tobi" {
+			reason = "tobi: " + seatLabel(oc.BustSeat)
+		}
+		out = append(out, labelStyle.Render("Reason: "+reason))
+	}
+	out = append(out, "", liveKeyStyle.Render("[q] Quit"))
+	return strings.Join(out, "\n")
+}
+
+func describeOutcome(o game.Outcome) string {
+	switch v := o.(type) {
+	case game.OutcomeRon:
+		amount := 0
+		if v.Result != nil {
+			amount = v.Result.Award.Total
+		}
+		return fmt.Sprintf("%s ron from %s — %d", seatLabel(v.Winner), seatLabel(v.Loser), amount)
+	case game.OutcomeTsumo:
+		amount := 0
+		if v.Result != nil {
+			amount = v.Result.Award.Total
+		}
+		return fmt.Sprintf("%s tsumo — %d", seatLabel(v.Winner), amount)
+	case game.OutcomeRyuukyoku:
+		if len(v.TenpaiPlayers) == 0 {
+			return "Ryuukyoku — no tenpai"
+		}
+		names := make([]string, 0, len(v.TenpaiPlayers))
+		for _, s := range v.TenpaiPlayers {
+			names = append(names, seatLabel(s))
+		}
+		return "Ryuukyoku — tenpai: " + strings.Join(names, ", ")
+	}
+	return "Hand complete"
+}
+
+func formatDeltasRow(deltas, totals [4]int) string {
+	parts := make([]string, 0, 4)
+	for s := range game.Seat(4) {
+		sign := "+"
+		if deltas[s] < 0 {
+			sign = ""
+		}
+		parts = append(
+			parts,
+			fmt.Sprintf("%s %s%d (→%d)", seatLabel(s), sign, deltas[s], totals[s]),
+		)
+	}
+	return strings.Join(parts, "   ")
+}
+
+func seatLabel(s game.Seat) string {
+	switch s {
+	case game.SeatEast:
+		return "East"
+	case game.SeatSouth:
+		return "South"
+	case game.SeatWest:
+		return "West"
+	case game.SeatNorth:
+		return "North"
+	}
+	return "?"
 }
 
 // fixtureHand is retained for the legacy New(renderer) path that constructs
@@ -710,9 +1007,26 @@ func (m Model) renderStatus() string {
 	if m.game != nil {
 		wallRemaining = m.game.Wall().LiveRemaining()
 	}
+	handLabel := "East 1"
+	honba := 0
+	sticks := 0
+	humanScore := 25000
+	if m.match != nil {
+		handLabel = m.match.HandLabel()
+		honba = m.match.Honba()
+		sticks = m.match.RiichiSticks()
+		humanScore = m.match.Scores()[HumanSeat]
+	}
 	return statusStyle.Render(
-		fmt.Sprintf("East 1  ·  Honba 0  ·  Wall %d  ·  Dora: %s  ·  Seat: South  ·  Score 25000",
-			wallRemaining, m.firstDoraIndicator()),
+		fmt.Sprintf(
+			"%s  ·  Honba %d  ·  Riichi %d  ·  Wall %d  ·  Dora: %s  ·  Seat: South  ·  Score %d",
+			handLabel,
+			honba,
+			sticks,
+			wallRemaining,
+			m.firstDoraIndicator(),
+			humanScore,
+		),
 	)
 }
 
@@ -728,7 +1042,11 @@ func (m Model) firstDoraIndicator() string {
 }
 
 func (m Model) renderToimenRow() string {
-	label := labelStyle.Render("        Toimen — North · 25000")
+	score := 25000
+	if m.match != nil {
+		score = m.match.Scores()[game.SeatNorth]
+	}
+	label := labelStyle.Render(fmt.Sprintf("        Toimen — North · %d", score))
 	row := m.renderBackRow(13)
 	pond := renderPondZone(m.Pond(game.SeatNorth), m.renderer)
 	if pond == "" {
@@ -758,7 +1076,7 @@ func (m Model) renderMidRow() string {
 }
 
 func (m Model) renderKamichaColumn() string {
-	label := labelStyle.Render("Kamicha · East")
+	label := labelStyle.Render("Kamicha · East" + m.scoreSuffix(game.SeatEast))
 	pond := renderPondZone(m.Pond(game.SeatEast), m.renderer)
 	if pond == "" {
 		return label
@@ -767,7 +1085,7 @@ func (m Model) renderKamichaColumn() string {
 }
 
 func (m Model) renderShimochaColumn() string {
-	label := labelStyle.Render("Shimocha · West")
+	label := labelStyle.Render("Shimocha · West" + m.scoreSuffix(game.SeatWest))
 	pond := renderPondZone(m.Pond(game.SeatWest), m.renderer)
 	if pond == "" {
 		return label
@@ -780,10 +1098,21 @@ func (m Model) renderCentreInfo() string {
 	if m.game != nil {
 		wall = m.game.Wall().LiveRemaining()
 	}
+	handLabel := "East 1"
+	honba := 0
+	humanScore := 25000
+	if m.match != nil {
+		handLabel = m.match.HandLabel()
+		honba = m.match.Honba()
+		humanScore = m.match.Scores()[HumanSeat]
+	}
 	return labelStyle.Render(fmt.Sprintf(
-		"     Round: East 1\n     Honba:  0\n     Wall:   %d\n     Dora:   %s\n     You:    South · 25000",
+		"     Round: %s\n     Honba:  %d\n     Wall:   %d\n     Dora:   %s\n     You:    South · %d",
+		handLabel,
+		honba,
 		wall,
 		m.firstDoraIndicator(),
+		humanScore,
 	))
 }
 

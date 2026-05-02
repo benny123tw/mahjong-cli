@@ -13,8 +13,9 @@ import (
 )
 
 var (
-	flagPlayASCII bool
-	flagPlaySeed  int64
+	flagPlayASCII     bool
+	flagPlaySeed      int64
+	flagPlayNoAkadora bool
 )
 
 var playCmd = &cobra.Command{
@@ -35,8 +36,13 @@ program prints the OS-derived seed at startup so the run can be replayed.`,
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "Seed: %d\n", seed)
 
-		g := game.New(seed)
-		m := play.NewWithGame(renderer, g)
+		var match *game.Match
+		if flagPlayNoAkadora {
+			match = game.NewMatchWithOptions(seed, game.MatchOptions{Akadora: false})
+		} else {
+			match = game.NewMatch(seed)
+		}
+		m := play.NewWithMatch(renderer, match)
 		_, err := tea.NewProgram(m).Run()
 		return err
 	},
@@ -63,5 +69,7 @@ func init() {
 		BoolVar(&flagPlayASCII, "ascii", false, "Use ASCII boxed tile rendering instead of Unicode glyphs")
 	playCmd.Flags().
 		Int64Var(&flagPlaySeed, "seed", 0, "Deterministic shuffle seed (0 = OS random; printed at startup)")
+	playCmd.Flags().
+		BoolVar(&flagPlayNoAkadora, "no-akadora", false, "Disable red fives (akadora). Default is on, matching modern riichi clients.")
 	rootCmd.AddCommand(playCmd)
 }

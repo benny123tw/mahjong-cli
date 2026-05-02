@@ -25,6 +25,11 @@ type Game struct {
 	doraIndicators []tile.Tile
 	roundWind      uint8
 
+	// dealer is the seat with East-wind for this hand. East 1 has dealer =
+	// SeatEast; subsequent hands rotate the dealer per Match.AdvanceFromOutcome.
+	// SeatWindFor uses this offset to compute each seat's hand-relative wind.
+	dealer Seat
+
 	// callsHappened tracks whether any call interrupted the round, used by
 	// Group C yaku detection (ippatsu, double riichi, chiihou).
 	callsHappened bool
@@ -59,14 +64,30 @@ type Game struct {
 	// deposit deducts 1000; ryuukyoku noten payments and agari payouts
 	// adjust further (payout integration ships with smart-ai).
 	scores [numSeats]int
+
+	// Per-seat temporary furiten. Armed when the seat passes on a discard
+	// that completes a winning shape on their hand; cleared on the seat's
+	// next own draw. Distinct from permanent furiten (own pond contains a
+	// machi tile), which is recomputed from g.discards on every IsFuriten
+	// call. Both flow into IsFuriten with OR semantics.
+	tempFuriten [numSeats]bool
+
+	// Per-seat flag tracking whether the seat's most recent intake was a
+	// rinshan replacement tile (drawn after declaring kan). When true,
+	// `contextForWin` populates `calc.Context.Rinshan = true` for the
+	// rinshan kaihou yaku check. Cleared on the seat's next discard
+	// (without tsumo) or on any successful pon/chi call.
+	lastDrawWasRinshan [numSeats]bool
 }
 
-// Meld is an opened meld (called pon, chi, or kan). A future change adds
-// kan support; for v1 only pon and chi are produced.
+// Meld is an opened meld (called pon, chi, or kan). For kan-kind melds,
+// `KanKind` discriminates between ankan, minkan, and shouminkan; for
+// pon/chi it stays at zero (KanNone).
 type Meld struct {
-	Kind  MeldKind
-	Tiles []tile.Tile
-	From  Seat // discarder whose tile completed the meld
+	Kind    MeldKind
+	KanKind KanKind
+	Tiles   []tile.Tile
+	From    Seat // discarder whose tile completed the meld
 }
 
 // MeldKind is the call type that produced this meld.
@@ -78,27 +99,83 @@ const (
 	MeldKan
 )
 
+// KanKind sub-discriminates Meld when Kind == MeldKan. For non-kan melds,
+// KanNone (the zero value) is the convention.
+type KanKind uint8
+
+const (
+	KanNone KanKind = iota
+	KanAnkan
+	KanMinkan
+	KanShouminkan
+)
+
+// GameOptions configures per-hand Game construction. Akadora flows through
+// to the wall constructor so the per-hand wall picks up red fives (or not)
+// in line with the match-level option.
+//
+//nolint:revive // GameOptions intentionally pairs with MatchOptions per the add-akadora design; "Options" alone is ambiguous at call sites that thread both through Match → Game.
+type GameOptions struct {
+	Akadora bool
+}
+
 // New starts a fresh round: shuffles a 136-tile wall from `seed`, deals 13
 // to each seat, reveals one dora indicator, and sets state to
-// StateAwaitingDraw{East} per the dealer-draws-first rule.
+// StateAwaitingDraw{East} per the dealer-draws-first rule. Single-hand
+// shortcut for the East-dealer East-wind setup; multi-hand callers use
+// NewWithDealer.
 func New(seed int64) *Game {
-	w := NewWall(seed)
+	return NewWithDealer(seed, SeatEast, tile.EastWind)
+}
+
+// NewWithDealer is the dealer-aware constructor. Use this when a hanchan's
+// later hands rotate the dealer to a non-East seat or transition the round
+// wind to South. The dealer draws first; SeatWindFor computes each seat's
+// hand-relative wind by offset from `dealer`. Akadora is on by default;
+// callers needing akadora-off should use NewWithDealerOptions.
+func NewWithDealer(seed int64, dealer Seat, roundWind uint8) *Game {
+	return NewWithDealerOptions(seed, dealer, roundWind, GameOptions{Akadora: true})
+}
+
+// NewWithDealerOptions is the dealer-aware constructor with a GameOptions
+// passthrough. The akadora setting threads to NewWallWithOptions so per-hand
+// walls reflect the match-level rule.
+func NewWithDealerOptions(seed int64, dealer Seat, roundWind uint8, opts GameOptions) *Game {
+	w := NewWallWithOptions(seed, WallOptions(opts))
 	deal := w.Deal()
 	g := &Game{
 		seed:           seed,
 		wall:           w,
-		state:          StateAwaitingDraw{Player: SeatEast},
+		state:          StateAwaitingDraw{Player: dealer},
 		doraIndicators: []tile.Tile{deal.DoraIndicator},
-		roundWind:      tile.EastWind,
+		roundWind:      roundWind,
+		dealer:         dealer,
 	}
 	for seat := range numSeats {
 		g.hands[seat] = deal.Hands[seat]
 		g.scores[seat] = 25000
 	}
 	sortConcealed(g.hands[HumanSeat])
-	g.logf("deal seed=%d dora=%s", seed, deal.DoraIndicator)
+	g.logf(
+		"deal seed=%d dealer=%s round=%d dora=%s",
+		seed,
+		seatName(dealer),
+		roundWind,
+		deal.DoraIndicator,
+	)
 	return g
 }
+
+// SeatWindFor returns the seat's hand-relative wind. Dealer is East-wind;
+// dealer.Next() is South-wind, etc. For the East-1 default (dealer =
+// SeatEast), this matches the legacy `Seat.SeatWind()` exactly.
+func (g *Game) SeatWindFor(s Seat) uint8 {
+	offset := (uint8(s) + numSeats - uint8(g.dealer)) % numSeats
+	return tile.EastWind + offset
+}
+
+// Dealer returns the seat that was dealer for this hand.
+func (g *Game) Dealer() Seat { return g.dealer }
 
 // sortConcealed sorts a tile slice in-place by ascending tile-ID, which is
 // the canonical riichi order: M1..M9, P1..P9, S1..S9, EastWind, SouthWind,
@@ -179,6 +256,8 @@ func (g *Game) Step(in Input) (Event, error) {
 		return g.stepFromAwaitingDiscard(s, in)
 	case StateAwaitingClaims:
 		return g.stepFromAwaitingClaims(s, in)
+	case StateAwaitingChankan:
+		return g.stepFromAwaitingChankan(s, in)
 	case StateRoundOver, StateGameOver:
 		return nil, ErrRoundOver
 	}
@@ -210,6 +289,12 @@ var ErrIllegalRiichi = errors.New("game: illegal riichi declaration")
 // the seat's machi tile appears in their own pond (permanent furiten).
 var ErrFuritenRon = errors.New("game: ron blocked by furiten")
 
+// ErrIllegalKan is returned when a kan declaration fails any precondition:
+// no 4-of-a-kind for ankan, no 3-of-a-kind for minkan, no matching open
+// pon for shouminkan, declarer is in riichi, or the rinshan reserve is
+// exhausted (5th kan).
+var ErrIllegalKan = errors.New("game: illegal kan declaration")
+
 func (g *Game) stepFromAwaitingDraw(s StateAwaitingDraw, in Input) (Event, error) {
 	if _, ok := in.(InputDraw); !ok {
 		return nil, ErrInvalidInputForState
@@ -222,6 +307,7 @@ func (g *Game) stepFromAwaitingDraw(s StateAwaitingDraw, in Input) (Event, error
 		return EventNop{}, nil
 	}
 	g.hands[s.Player] = append(g.hands[s.Player], t)
+	g.tempFuriten[s.Player] = false
 	g.state = StateAwaitingDiscard(s)
 	g.logf("draw %s %s", seatName(s.Player), t)
 	return EventNop{}, nil
@@ -229,6 +315,22 @@ func (g *Game) stepFromAwaitingDraw(s StateAwaitingDraw, in Input) (Event, error
 
 func (g *Game) stepFromAwaitingDiscard(s StateAwaitingDiscard, in Input) (Event, error) {
 	switch v := in.(type) {
+	case InputDeclareAnkan:
+		if g.riichiDeclared[s.Player] {
+			return nil, ErrIllegalKan
+		}
+		if err := g.declareAnkan(s.Player, v.TileID); err != nil {
+			return nil, err
+		}
+		return EventNop{}, nil
+	case InputDeclareShouminkan:
+		if g.riichiDeclared[s.Player] {
+			return nil, ErrIllegalKan
+		}
+		if err := g.declareShouminkan(s.Player, v.TileID); err != nil {
+			return nil, err
+		}
+		return EventNop{}, nil
 	case InputDiscard:
 		if v.Index < 0 || v.Index >= len(g.hands[s.Player]) {
 			return nil, ErrIllegalDiscard
@@ -273,14 +375,22 @@ func (g *Game) stepFromAwaitingDiscard(s StateAwaitingDiscard, in Input) (Event,
 			g.ippatsuLive[s.Player] = false
 		}
 		g.logf("discard %s %s", seatName(s.Player), t)
+		// Discarding closes the rinshan-tsumo window for this seat.
+		g.lastDrawWasRinshan[s.Player] = false
 		g.state = StateAwaitingClaims{Discard: t, Discarder: s.Player}
 		return EventNop{}, nil
 	case InputDeclareTsumo:
-		concealed := append([]tile.Tile(nil), g.hands[s.Player]...)
+		// For a winning shape: concealed-hand tiles plus 3 tiles per open meld
+		// (kan contributes 3, the 4th is conceptual extra) must total 14.
+		hd := g.hands[s.Player]
+		if len(hd) == 0 {
+			return nil, ErrIllegalDiscard
+		}
+		winning := hd[len(hd)-1]
+		concealed := g.effectiveConcealed(s.Player)
 		if len(concealed) != 14 {
 			return nil, ErrIllegalDiscard
 		}
-		winning := concealed[len(concealed)-1]
 		h := hand.Hand{
 			Concealed: concealed,
 			Winning:   winning,
@@ -293,6 +403,7 @@ func (g *Game) stepFromAwaitingDiscard(s StateAwaitingDiscard, in Input) (Event,
 			// Yakuless win or invalid shape — keep player in current state.
 			return nil, ErrYakulessWin
 		}
+		g.lastDrawWasRinshan[s.Player] = false
 		g.logf("tsumo %s %s", seatName(s.Player), winning)
 		g.state = StateRoundOver{Outcome: OutcomeTsumo{
 			Winner: s.Player,
@@ -311,6 +422,24 @@ func (g *Game) stepFromAwaitingClaims(s StateAwaitingClaims, in Input) (Event, e
 	if !ok {
 		return nil, ErrInvalidInputForState
 	}
+	// Temporary furiten: any non-discarder seat whose hand wins on the
+	// discard but did not submit a ron claim is locked out of ron until
+	// their next own draw. Yakuless winning shapes still arm — the rule
+	// is shape-based, not yaku-based.
+	for seat := range Seat(numSeats) {
+		if seat == s.Discarder {
+			continue
+		}
+		concealed := append([]tile.Tile(nil), g.hands[seat]...)
+		concealed = append(concealed, s.Discard)
+		if !hand.IsWinning(hand.Hand{Concealed: concealed}) {
+			continue
+		}
+		if claim, present := rc.Claims[seat]; present && claim.Kind == ClaimRon {
+			continue
+		}
+		g.tempFuriten[seat] = true
+	}
 	winner, kind, ok := ResolveClaims(rc.Claims, s.Discarder)
 	if !ok {
 		g.state = StateAwaitingDraw{Player: s.Discarder.Next()}
@@ -326,7 +455,7 @@ func (g *Game) stepFromAwaitingClaims(s StateAwaitingClaims, in Input) (Event, e
 		if g.IsFuriten(winner) {
 			return nil, ErrFuritenRon
 		}
-		concealed := append([]tile.Tile(nil), g.hands[winner]...)
+		concealed := g.effectiveConcealed(winner)
 		concealed = append(concealed, s.Discard)
 		h := hand.Hand{
 			Concealed: concealed,
@@ -405,8 +534,70 @@ func (g *Game) stepFromAwaitingClaims(s StateAwaitingClaims, in Input) (Event, e
 		g.logf("chi %s from %s on %s", seatName(winner), seatName(s.Discarder), s.Discard)
 		g.state = StateAwaitingDiscard{Player: winner}
 		return EventNop{}, nil
+	case ClaimKan:
+		// Minkan: claimant has exactly 3 of the discarded tile in hand.
+		// declareMinkan handles the meld + ippatsu + rinshan flow.
+		if err := g.declareMinkan(winner, s.Discard, s.Discarder); err != nil {
+			return nil, err
+		}
+		if winner == HumanSeat {
+			sortConcealed(g.hands[winner])
+		}
+		return EventNop{}, nil
 	}
 	return nil, fmt.Errorf("game: unhandled claim kind %d", kind)
+}
+
+// stepFromAwaitingChankan resolves the chankan claim window opened by a
+// shouminkan declaration. Only InputResolveClaims with ClaimRon is honored;
+// pon/chi/kan claims in this state are ignored. On a successful chankan ron,
+// the round ends and the upgrade is NOT applied. On no ron (or all rons
+// rejected), the engine completes the shouminkan upgrade and runs afterKan.
+func (g *Game) stepFromAwaitingChankan(s StateAwaitingChankan, in Input) (Event, error) {
+	rc, ok := in.(InputResolveClaims)
+	if !ok {
+		return nil, ErrInvalidInputForState
+	}
+	// Only ron is honored in a chankan window. Filter the claim map.
+	ronClaims := map[Seat]Claim{}
+	for seat, c := range rc.Claims {
+		if c.Kind == ClaimRon && seat != s.Declarer {
+			ronClaims[seat] = c
+		}
+	}
+	if len(ronClaims) > 0 {
+		winner, _, _ := ResolveClaims(ronClaims, s.Declarer)
+		if g.IsFuriten(winner) {
+			return nil, ErrFuritenRon
+		}
+		concealed := g.effectiveConcealed(winner)
+		concealed = append(concealed, s.UpgradeTile)
+		h := hand.Hand{
+			Concealed: concealed,
+			Winning:   s.UpgradeTile,
+			IsTsumo:   false,
+			Open:      g.IsHandOpen(winner),
+		}
+		ctx := g.contextForWin(winner, false)
+		result := calc.Analyze(h, ctx)
+		if result == nil {
+			return nil, ErrYakulessWin
+		}
+		g.logf("chankan %s from %s on %s", seatName(winner), seatName(s.Declarer), s.UpgradeTile)
+		g.state = StateRoundOver{Outcome: OutcomeRon{
+			Winner: winner,
+			Loser:  s.Declarer,
+			Tile:   s.UpgradeTile,
+			Hand:   h,
+			Result: result,
+		}}
+		return EventNop{}, nil
+	}
+	// No ron: complete the upgrade.
+	if err := g.completeShouminkan(s.Declarer, s.UpgradeTile); err != nil {
+		return nil, err
+	}
+	return EventNop{}, nil
 }
 
 // closeAllIppatsuWindows clears the ippatsu window for every riichi-declared
@@ -485,7 +676,7 @@ func (g *Game) popLastDiscard(s Seat) {
 // Rinshan / Chankan require kan support, deferred to add-kan-support.
 func (g *Game) contextForWin(winner Seat, isTsumo bool) calc.Context {
 	ctx := calc.Context{
-		SeatWind:     winner.SeatWind(),
+		SeatWind:     g.SeatWindFor(winner),
 		RoundWind:    g.roundWind,
 		Dora:         g.doraIndicators,
 		Riichi:       g.riichiDeclared[winner],
@@ -498,8 +689,16 @@ func (g *Game) contextForWin(winner Seat, isTsumo bool) calc.Context {
 	if !isTsumo && g.wall.LiveRemaining() == 0 {
 		ctx.Houtei = true
 	}
+	if isTsumo && g.lastDrawWasRinshan[winner] {
+		ctx.Rinshan = true
+	}
+	if !isTsumo {
+		if _, inChankan := g.state.(StateAwaitingChankan); inChankan {
+			ctx.Chankan = true
+		}
+	}
 	if isTsumo && !g.callsHappened && g.noPriorDiscards() {
-		if winner == SeatEast {
+		if winner == g.dealer {
 			ctx.Tenhou = true
 		} else {
 			ctx.Chiihou = true
@@ -595,9 +794,40 @@ func (g *Game) SetTestPond(s Seat, tiles []tile.Tile) {
 	g.discards[s] = append(g.discards[s][:0], tiles...)
 }
 
+// SetTestRiichiDeclared sets the riichi-declared flag on a seat. Test-only —
+// used by danger-aware bot discard tests that need a riichi declarer
+// without driving the full declaration flow (which requires a tenpai
+// 14-tile hand, score deposit, and wall reservation).
+func (g *Game) SetTestRiichiDeclared(s Seat, declared bool) {
+	g.riichiDeclared[s] = declared
+}
+
+// SetTestMeld appends an open meld to a seat's melds slice. Test-only —
+// used by the kan and chankan tests to plant an open MeldPon (or other
+// meld) without driving a real call sequence.
+func (g *Game) SetTestMeld(s Seat, m Meld) {
+	g.melds[s] = append(g.melds[s], m)
+}
+
 // IsHandOpen reports whether the seat's hand has any called melds.
 func (g *Game) IsHandOpen(s Seat) bool {
 	return g.testOpen[s] || len(g.melds[s]) > 0
+}
+
+// effectiveConcealed returns a 14-tile-equivalent slice for use by
+// calc.Analyze: the seat's concealed hand plus 3 tiles per open meld
+// (pon/chi/kan). For kan melds the 4th tile is omitted — the
+// hand-decomposition view treats every meld as one set worth of three
+// tiles. Used by the tsumo and ron paths so wins with melds (including
+// ankan rinshan tsumo) decompose correctly.
+func (g *Game) effectiveConcealed(s Seat) []tile.Tile {
+	out := append([]tile.Tile(nil), g.hands[s]...)
+	for _, m := range g.melds[s] {
+		for i := 0; i < 3 && i < len(m.Tiles); i++ {
+			out = append(out, m.Tiles[i])
+		}
+	}
+	return out
 }
 
 // Score returns the seat's current point total. Initialized to 25000 in
@@ -605,14 +835,23 @@ func (g *Game) IsHandOpen(s Seat) bool {
 // agari payouts and ryuukyoku noten payments.
 func (g *Game) Score(s Seat) int { return g.scores[s] }
 
-// IsFuriten reports whether the seat is in permanent furiten — any tile in
-// the seat's own pond matches a tile ID in the seat's current machi. Returns
-// false for non-tenpai shapes (machi is undefined). v1 only implements
-// permanent furiten; temporary furiten across opponent discards lands when
-// bot ron is wired in add-smart-ai.
+// IsRiichiDeclared reports whether the seat has declared riichi in the
+// current round. Read by the TUI dispatcher to assemble the danger map
+// for danger-aware bot discards (genbutsu / suji safety).
+func (g *Game) IsRiichiDeclared(s Seat) bool { return g.riichiDeclared[s] }
+
+// IsFuriten reports whether the seat is in furiten — either permanent
+// (a machi tile sits in the seat's own pond) or temporary (a winning tile
+// was passed since the seat's last own draw, tracked by g.tempFuriten).
+// The two conditions are OR'd together. Returns false for non-tenpai
+// shapes (machi is undefined and the temp-furiten flag is meaningless
+// outside tenpai context).
 func (g *Game) IsFuriten(s Seat) bool {
 	if len(g.hands[s]) != 13 {
 		return false
+	}
+	if g.tempFuriten[s] {
+		return true
 	}
 	machi := hand.Machi(hand.Hand{Concealed: g.hands[s]})
 	if len(machi) == 0 {
