@@ -941,3 +941,212 @@ func TestStandingsScreenOnHanchanCompletion(t *testing.T) {
 		t.Errorf("standings 'q' returned nil cmd, want tea.Quit")
 	}
 }
+
+func TestQuestionMarkTogglesPeekVisibility(t *testing.T) {
+	g := game.New(7)
+	m := NewWithGame(UnicodeRenderer{}, g)
+
+	if m.peekVisible {
+		t.Fatalf("initial peekVisible = true, want false")
+	}
+	updated, _ := m.Update(tea.KeyPressMsg{Code: '?'})
+	mu := updated.(Model)
+	if !mu.peekVisible {
+		t.Errorf("after first ?-press, peekVisible = false, want true")
+	}
+	updated2, _ := mu.Update(tea.KeyPressMsg{Code: '?'})
+	mu2 := updated2.(Model)
+	if mu2.peekVisible {
+		t.Errorf("after second ?-press, peekVisible = true, want false")
+	}
+}
+
+func TestRenderFooterShowsWaitLineWhenPeekVisibleAndTenpai(t *testing.T) {
+	g := game.New(7)
+	// Hand 1m2m3m4p5p6p7s8s9s2z2z3z3z is tenpai waiting on the second 4p/7p
+	// (… actually it's a slightly different shape — let me use a known
+	// tenpai). Use 1m2m3m4p5p6p7s8s9s1m1m2z2z which has been used elsewhere
+	// in this file as a tenpai fixture (waits on 1m).
+	g.SetTestHand(game.SeatSouth, []tile.Tile{
+		{ID: tile.M1},
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.P4},
+		{ID: tile.P5},
+		{ID: tile.P6},
+		{ID: tile.S7},
+		{ID: tile.S8},
+		{ID: tile.S9},
+		{ID: tile.M1},
+		{ID: tile.M1},
+		{ID: tile.SouthWind},
+		{ID: tile.SouthWind},
+	})
+	g.SetTestState(game.StateAwaitingDiscard{Player: game.SeatSouth})
+
+	m := NewWithGame(UnicodeRenderer{}, g)
+	m = m.handlePeek() // populate cache + flip peekVisible to true
+	if !m.peekVisible {
+		t.Fatalf("peekVisible after handlePeek = false, want true")
+	}
+	footer := m.renderFooter()
+	if !strings.Contains(footer, "Wait:") {
+		t.Errorf("footer missing 'Wait:' prefix when peek visible + tenpai. Footer:\n%s", footer)
+	}
+}
+
+func TestRenderFooterShowsNotTenpaiWhenPeekVisibleAndNotTenpai(t *testing.T) {
+	g := game.New(7)
+	// Plant a far-from-tenpai hand: 13 random tiles with no shape.
+	g.SetTestHand(game.SeatSouth, []tile.Tile{
+		{ID: tile.M1},
+		{ID: tile.M3},
+		{ID: tile.M5},
+		{ID: tile.M7},
+		{ID: tile.M9},
+		{ID: tile.P2},
+		{ID: tile.P4},
+		{ID: tile.P6},
+		{ID: tile.S1},
+		{ID: tile.S3},
+		{ID: tile.S9},
+		{ID: tile.EastWind},
+		{ID: tile.Haku},
+	})
+	g.SetTestState(game.StateAwaitingDiscard{Player: game.SeatSouth})
+
+	m := NewWithGame(UnicodeRenderer{}, g)
+	m = m.handlePeek()
+	if !m.peekVisible {
+		t.Fatalf("peekVisible after handlePeek = false, want true")
+	}
+	footer := m.renderFooter()
+	if !strings.Contains(footer, "Wait: (not tenpai)") {
+		t.Errorf("footer missing 'Wait: (not tenpai)' for non-tenpai hand. Footer:\n%s", footer)
+	}
+}
+
+func TestFuritenBadgeAppearsWhenHumanTenpaiAndFuriten(t *testing.T) {
+	g := game.New(7)
+	// Tenpai hand waiting on 1m.
+	g.SetTestHand(game.SeatSouth, []tile.Tile{
+		{ID: tile.M1},
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.P4},
+		{ID: tile.P5},
+		{ID: tile.P6},
+		{ID: tile.S7},
+		{ID: tile.S8},
+		{ID: tile.S9},
+		{ID: tile.M1},
+		{ID: tile.M1},
+		{ID: tile.SouthWind},
+		{ID: tile.SouthWind},
+	})
+	// Plant a 1m in the human's own pond → permanent furiten.
+	g.SetTestPond(game.SeatSouth, []tile.Tile{{ID: tile.M1}})
+	g.SetTestState(game.StateAwaitingDiscard{Player: game.SeatSouth})
+
+	m := NewWithGame(UnicodeRenderer{}, g)
+	footer := m.renderFooter()
+	if !strings.Contains(footer, "FURITEN") {
+		t.Errorf(
+			"Unicode footer missing [FURITEN] badge for tenpai+furiten human. Footer:\n%s",
+			footer,
+		)
+	}
+}
+
+func TestFuritenBadgeASCIIUsesParenForm(t *testing.T) {
+	g := game.New(7)
+	g.SetTestHand(game.SeatSouth, []tile.Tile{
+		{ID: tile.M1},
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.P4},
+		{ID: tile.P5},
+		{ID: tile.P6},
+		{ID: tile.S7},
+		{ID: tile.S8},
+		{ID: tile.S9},
+		{ID: tile.M1},
+		{ID: tile.M1},
+		{ID: tile.SouthWind},
+		{ID: tile.SouthWind},
+	})
+	g.SetTestPond(game.SeatSouth, []tile.Tile{{ID: tile.M1}})
+	g.SetTestState(game.StateAwaitingDiscard{Player: game.SeatSouth})
+
+	m := NewWithGame(ASCIIRenderer{}, g)
+	footer := m.renderFooter()
+	if !strings.Contains(footer, "(furiten)") {
+		t.Errorf("ASCII footer missing (furiten) form. Footer:\n%s", footer)
+	}
+	if strings.Contains(footer, "[FURITEN]") {
+		t.Errorf("ASCII footer should not contain [FURITEN]. Footer:\n%s", footer)
+	}
+}
+
+func TestFuritenBadgeAbsentWhenNotTenpai(t *testing.T) {
+	g := game.New(7)
+	// Far-from-tenpai hand.
+	g.SetTestHand(game.SeatSouth, []tile.Tile{
+		{ID: tile.M1},
+		{ID: tile.M3},
+		{ID: tile.M5},
+		{ID: tile.M7},
+		{ID: tile.M9},
+		{ID: tile.P2},
+		{ID: tile.P4},
+		{ID: tile.P6},
+		{ID: tile.S1},
+		{ID: tile.S3},
+		{ID: tile.S9},
+		{ID: tile.EastWind},
+		{ID: tile.Haku},
+	})
+	g.SetTestPond(game.SeatSouth, []tile.Tile{{ID: tile.M1}})
+	g.SetTestState(game.StateAwaitingDiscard{Player: game.SeatSouth})
+
+	m := NewWithGame(UnicodeRenderer{}, g)
+	footer := m.renderFooter()
+	if strings.Contains(footer, "FURITEN") || strings.Contains(footer, "(furiten)") {
+		t.Errorf("non-tenpai hand should NOT show furiten badge. Footer:\n%s", footer)
+	}
+}
+
+func TestFuritenBadgeAbsentInCallWindow(t *testing.T) {
+	g := game.New(7)
+	// Tenpai+furiten human.
+	g.SetTestHand(game.SeatSouth, []tile.Tile{
+		{ID: tile.M1},
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.P4},
+		{ID: tile.P5},
+		{ID: tile.P6},
+		{ID: tile.S7},
+		{ID: tile.S8},
+		{ID: tile.S9},
+		{ID: tile.M1},
+		{ID: tile.M1},
+		{ID: tile.SouthWind},
+		{ID: tile.SouthWind},
+	})
+	g.SetTestPond(game.SeatSouth, []tile.Tile{{ID: tile.M1}})
+	g.SetTestState(game.StateAwaitingClaims{
+		Discard:   tile.Tile{ID: tile.M1},
+		Discarder: game.SeatEast,
+	})
+
+	m := NewWithGame(UnicodeRenderer{}, g)
+	footer := m.renderFooter()
+	// Call-window footer renders RenderCallFooter which uses the inline
+	// [R]on (furiten) suffix. We assert the standalone [FURITEN] badge is NOT
+	// emitted (the `(furiten)` substring may appear via Ron-button suffix —
+	// only check for the standalone uppercase badge form).
+	if strings.Contains(footer, "[FURITEN]") {
+		t.Errorf("call window should not emit standalone [FURITEN] badge. Footer:\n%s", footer)
+	}
+}

@@ -66,6 +66,12 @@ type Model struct {
 	peekMachi   []uint8
 	peekHandLen int
 
+	// peekVisible is the TUI-only visibility flag toggled by the `?` key.
+	// When true, the action footer renders an extra "Wait: ..." line below
+	// the keys row. Auto-cleared at every peek-cache reset site so it
+	// hides on state change without requiring a second `?` press.
+	peekVisible bool
+
 	// pendingTransition holds the just-applied AdvanceFromOutcome result
 	// when the player is reviewing the end-of-hand summary. While non-nil,
 	// View renders an ack panel in place of the normal play layout, and
@@ -195,6 +201,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.peekShanten = peekUnknown
 			m.peekMachi = nil
+			m.peekVisible = false
 			m = m.autoDrawHuman()
 			return m, m.maybeBotTickCmd()
 		}
@@ -548,6 +555,7 @@ func (m Model) handlePeek() Model {
 		m.peekMachi = nil
 	}
 	m.peekHandLen = len(concealed)
+	m.peekVisible = !m.peekVisible
 	return m
 }
 
@@ -583,6 +591,7 @@ func (m Model) handleDiscard() Model {
 	}
 	m.peekShanten = peekUnknown
 	m.peekMachi = nil
+	m.peekVisible = false
 	if m.cursor >= len(m.game.Hand(HumanSeat)) {
 		m.cursor = max(0, len(m.game.Hand(HumanSeat))-1)
 	}
@@ -977,12 +986,13 @@ func fixtureHand() hand.Hand {
 // --- Section renderers below ---
 
 var (
-	statusStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("250")).Bold(true)
-	labelStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	cursorMarkStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true)
-	focusedTileStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true)
-	greyedKeyStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	liveKeyStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
+	statusStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("250")).Bold(true)
+	labelStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	cursorMarkStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true)
+	focusedTileStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true)
+	greyedKeyStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	liveKeyStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("250"))
+	furitenBadgeStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
 )
 
 func (m Model) renderLayout() string {
@@ -1196,5 +1206,59 @@ func (m Model) renderFooter() string {
 	} else if m.ackKey != "" {
 		footer += "    " + cursorMarkStyle.Render(fmt.Sprintf("[ack: %s]", m.ackKey))
 	}
+	if badge := m.renderFuritenBadge(); badge != "" {
+		footer += "    " + badge
+	}
+	if m.peekVisible {
+		footer += "\n" + m.renderPeekLine()
+	}
 	return footer
+}
+
+// renderFuritenBadge returns the standalone furiten badge ("[FURITEN]" in
+// Unicode mode, "(furiten)" in ASCII mode) when the human is at tenpai AND
+// in furiten AND it's the human's own turn cycle. Returns empty string in
+// every other case. The call window handles its own furiten indicator via
+// the [R]on (furiten) Ron-button suffix.
+func (m Model) renderFuritenBadge() string {
+	if m.game == nil {
+		return ""
+	}
+	switch s := m.game.State().(type) {
+	case game.StateAwaitingDraw:
+		if s.Player != HumanSeat {
+			return ""
+		}
+	case game.StateAwaitingDiscard:
+		if s.Player != HumanSeat {
+			return ""
+		}
+	default:
+		return ""
+	}
+	humanHand := m.game.Hand(HumanSeat)
+	if hand.Shanten(hand.Hand{Concealed: humanHand}) != 0 {
+		return ""
+	}
+	if !m.game.IsFuriten(HumanSeat) {
+		return ""
+	}
+	if _, isASCII := m.renderer.(ASCIIRenderer); isASCII {
+		return "(furiten)"
+	}
+	return furitenBadgeStyle.Render("[FURITEN]")
+}
+
+// renderPeekLine returns the "Wait: ..." line shown beneath the action keys
+// when peekVisible is true. Tenpai hands list each machi tile ID via
+// `tile.Tile.String()`; non-tenpai hands render "(not tenpai)".
+func (m Model) renderPeekLine() string {
+	if m.peekShanten == 0 && len(m.peekMachi) > 0 {
+		ids := make([]string, 0, len(m.peekMachi))
+		for _, id := range m.peekMachi {
+			ids = append(ids, (tile.Tile{ID: id}).String())
+		}
+		return "Wait: " + strings.Join(ids, " ")
+	}
+	return "Wait: (not tenpai)"
 }

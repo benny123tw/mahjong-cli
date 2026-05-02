@@ -24,6 +24,6 @@ var FooterKeys = []KeyBinding{
 	{Key: "C", Label: "Chi", Greyed: true},
 	{Key: "K", Label: "Kan", Greyed: true},
 	{Key: "Spc", Label: "Pass", Greyed: true},
-	{Key: "?", Label: "Peek", Greyed: true},
+	{Key: "?", Label: "Peek"},
 	{Key: "Q", Label: "Quit"},
 }
