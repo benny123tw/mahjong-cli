@@ -399,7 +399,17 @@ func (m Model) dispatchBotDiscard(seat game.Seat) {
 	}
 
 	danger := m.assembleDangerMap(seat, hd)
-	idx := max(bot.DangerAwarePickDiscard(hd, danger), 0)
+	// Fold mode: when at least one opponent has declared riichi (danger map
+	// non-empty) AND the bot's 14-tile hand is shanten >= 2, switch from the
+	// push-mode K=2000 blend to fold-mode K=1_000_000 so the bot picks the
+	// safest tile regardless of isolation. Per the Bot Decision Strategy
+	// fold-mode rule.
+	var idx int
+	if len(danger) > 0 && hand.Shanten(hand.Hand{Concealed: hd}) >= 2 {
+		idx = max(bot.FoldDiscard(hd, danger), 0)
+	} else {
+		idx = max(bot.DangerAwarePickDiscard(hd, danger), 0)
+	}
 	_, _ = m.game.Step(game.InputDiscard{Index: idx})
 }
 

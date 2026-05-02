@@ -1,0 +1,20 @@
+## 1. FoldDiscard — engine-side fold-mode tile picker
+
+- [x] 1.1 In `internal/game/bot_test.go`, add a failing test `TestFoldDiscardPicksGenbutsuOverHigherIsolation` that constructs a `*Bot`, builds a 14-tile hand containing both a genbutsu candidate (e.g. `tile.P5`, danger=0 in the map) and a high-isolation unknown-danger candidate (e.g. `tile.NorthWind`, no map entry → default danger=2), then calls `bot.FoldDiscard(hand, danger)` and asserts the returned index points to the genbutsu tile per the Bot Decision Strategy fold-mode rule.
+- [x] 1.2 In `internal/game/bot_test.go`, add a failing test `TestFoldDiscardFallsBackToPickDiscardWhenDangerEmpty` that calls `bot.FoldDiscard(hand, nil)` and asserts the returned index matches `bot.PickDiscard(hand)` (graceful degradation when no riichi declarer — fold mode is a no-op).
+- [x] 1.3 In `internal/game/bot.go`, add `const dangerPenaltyKFold = 1_000_000` near the existing `dangerPenaltyK` constant. Comment it as the fold-mode K value: large enough to dominate any isolation score (~85..1000 range) so danger always wins.
+- [x] 1.4 In `internal/game/bot.go`, add `func (b *Bot) FoldDiscard(hand []tile.Tile, danger map[uint8]int) int` mirroring `DangerAwarePickDiscard` but using `dangerPenaltyKFold` instead of `dangerPenaltyK`. The fallback contract (empty danger map → delegate to `b.PickDiscard(hand)`) and tiebreak (lowest tile ID) are identical to `DangerAwarePickDiscard`.
+- [x] 1.5 Run `go test ./internal/game/ -run "TestFoldDiscard"` and confirm both new tests pass.
+
+## 2. Play package — gate fold mode on shanten ≥ 2
+
+- [x] 2.1 In `internal/play/play_test.go`, add a failing test `TestDispatchBotDiscardUsesFoldModeAtHighShanten` that plants a bot's 14-tile hand at shanten ≥ 2 (use a deliberately broken shape like `1m 3m 5m 7m 9m 1p 3p 5p 7p 9p 1z 2z 3z 4z` — disconnected single tiles), plants the human's pond with one genbutsu tile against the bot's hand (e.g. set `g.SetTestRiichiDeclared(SeatSouth, true)` and `g.SetTestPond(SeatSouth, []tile.Tile{{ID: tile.P5}})` to mark `5p` as genbutsu), then drives `dispatchBotDiscard` for that bot seat and asserts the bot discarded `5p` (the genbutsu) — verifying that fold mode kicked in at high shanten.
+- [x] 2.2 In `internal/play/play_test.go`, add a failing test `TestDispatchBotDiscardUsesPushModeAtLowShanten` that plants a bot's hand at shanten ≤ 1 (close to tenpai) with a similar genbutsu-vs-isolation choice, drives the dispatcher, and asserts the bot picks via the push-mode `DangerAwarePickDiscard` path. The expected discard depends on the K=2000 blend; the test asserts the choice differs from FoldDiscard's choice when the isolation gap is large enough — concretely, plant a hand where push-mode picks the higher-isolation unsafe tile and fold-mode would pick the safer one, then verify push-mode behaviour is preserved.
+- [x] 2.3 In `internal/play/play.go` `dispatchBotDiscard` (the function that currently calls `bot.DangerAwarePickDiscard`), compute the bot's shanten from its 14-tile hand: `shanten := hand.Shanten(hand.Hand{Concealed: bot14TileHand})`. Branch the discard call: when `len(danger) > 0 && shanten >= 2`, call `bot.FoldDiscard(handTiles, danger)`; otherwise call `bot.DangerAwarePickDiscard(handTiles, danger)` (which itself falls back to `PickDiscard` when `danger` is empty). Per the Bot Decision Strategy fold-mode rule.
+- [x] 2.4 Run `go test ./internal/play/` and confirm the two new dispatcher tests pass plus all previously passing play tests stay green.
+
+## 3. Verification
+
+- [x] 3.1 Run `go test ./...` from the repository root and confirm all packages pass — especially the existing bot-defense and golden-game tests which exercise the riichi-discard path.
+- [x] 3.2 Run `golangci-lint run ./...` and resolve any lint issues introduced by the new constant, function, or dispatcher branch.
+- [x] 3.3 Build the binary (`go build -o /tmp/mahjong-cli .`) and confirm a smoke run still launches: `/tmp/mahjong-cli play --seed 42` starts cleanly without panic. Stop the run with `q` after the deal renders.

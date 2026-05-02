@@ -8,6 +8,7 @@ import (
 
 	"github.com/benny123tw/mahjong-cli/internal/game"
 	"github.com/benny123tw/mahjong-cli/internal/riichi/calc"
+	"github.com/benny123tw/mahjong-cli/internal/riichi/hand"
 	"github.com/benny123tw/mahjong-cli/internal/riichi/score"
 	"github.com/benny123tw/mahjong-cli/internal/riichi/tile"
 )
@@ -1148,5 +1149,115 @@ func TestFuritenBadgeAbsentInCallWindow(t *testing.T) {
 	// only check for the standalone uppercase badge form).
 	if strings.Contains(footer, "[FURITEN]") {
 		t.Errorf("call window should not emit standalone [FURITEN] badge. Footer:\n%s", footer)
+	}
+}
+
+func TestDispatchBotDiscardUsesFoldModeAtHighShanten(t *testing.T) {
+	// Bot at shanten >= 2 (deliberately broken: 14 disconnected tiles, all
+	// honors + isolated suit singletons). Human in riichi with 5p in pond.
+	// Bot's hand contains 5p (genbutsu). Fold mode SHALL route to
+	// FoldDiscard which picks the genbutsu over higher-isolation unknowns.
+	g := game.New(7)
+	g.SetTestRiichiDeclared(game.SeatSouth, true)
+	g.SetTestPond(game.SeatSouth, []tile.Tile{{ID: tile.P5}})
+	g.SetTestHand(game.SeatNorth, []tile.Tile{
+		{ID: tile.M1},
+		{ID: tile.M3},
+		{ID: tile.M5},
+		{ID: tile.M7},
+		{ID: tile.M9},
+		{ID: tile.P5}, // genbutsu
+		{ID: tile.S1},
+		{ID: tile.S3},
+		{ID: tile.S5},
+		{ID: tile.S7},
+		{ID: tile.S9},
+		{ID: tile.EastWind},
+		{ID: tile.WestWind},
+		{ID: tile.Haku},
+	})
+	g.SetTestState(game.StateAwaitingDiscard{Player: game.SeatNorth})
+
+	// Sanity: confirm the planted hand is at shanten >= 2 so fold-mode
+	// routing actually fires (the dispatcher gates on shanten >= 2).
+	if got := hand.Shanten(hand.Hand{Concealed: g.Hand(game.SeatNorth)}); got < 2 {
+		t.Fatalf("planted hand shanten = %d, want >= 2 for fold-mode test", got)
+	}
+
+	m := NewWithGame(UnicodeRenderer{}, g)
+	updated, _ := m.Update(BotTickMsg{})
+	mu := updated.(Model)
+
+	northPond := mu.Pond(game.SeatNorth)
+	if len(northPond) == 0 {
+		t.Fatalf(
+			"North's pond is empty after BotTickMsg; bot did not discard. State: %T",
+			mu.GameState(),
+		)
+	}
+	got := northPond[len(northPond)-1]
+	if got.ID != tile.P5 {
+		t.Errorf(
+			"fold-mode bot discarded %s, want 5p (the genbutsu). Fold mode at shanten>=2 with riichi declared MUST pick the safest tile.",
+			got,
+		)
+	}
+}
+
+func TestDispatchBotDiscardUsesPushModeAtLowShanten(t *testing.T) {
+	// Bot at shanten = 0 (tenpai). Even with riichi declared and a genbutsu
+	// available, the dispatcher SHALL route to DangerAwarePickDiscard (push
+	// mode) — fold-mode gates on shanten >= 2. The behavioral assertion is
+	// that the discard equals what DangerAwarePickDiscard would pick on the
+	// same fixture. This proves the dispatcher routes correctly without
+	// requiring push and fold to differ on this hand.
+	g := game.New(7)
+	g.SetTestRiichiDeclared(game.SeatSouth, true)
+	g.SetTestPond(game.SeatSouth, []tile.Tile{{ID: tile.P5}})
+	// Tenpai shape: 1m2m3m 4p5p6p 7s8s9s 5p East East + drawn extra. The 5p
+	// in hand is genbutsu; East is unknown-danger isolated honor.
+	g.SetTestHand(game.SeatNorth, []tile.Tile{
+		{ID: tile.M1},
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.P4},
+		{ID: tile.P5},
+		{ID: tile.P6},
+		{ID: tile.S7},
+		{ID: tile.S8},
+		{ID: tile.S9},
+		{ID: tile.P5},
+		{ID: tile.EastWind},
+		{ID: tile.EastWind},
+		{ID: tile.NorthWind},
+		{ID: tile.NorthWind},
+	})
+	g.SetTestState(game.StateAwaitingDiscard{Player: game.SeatNorth})
+
+	if got := hand.Shanten(hand.Hand{Concealed: g.Hand(game.SeatNorth)}); got > 1 {
+		t.Fatalf("planted hand shanten = %d, want <= 1 for push-mode test", got)
+	}
+
+	m := NewWithGame(UnicodeRenderer{}, g)
+	// Compute what DangerAwarePickDiscard would pick on this fixture.
+	bot := game.Bot{Seat: game.SeatNorth, Rng: g.Wall().Rand()}
+	hd := g.Hand(game.SeatNorth)
+	danger := m.assembleDangerMap(game.SeatNorth, hd)
+	wantIdx := bot.DangerAwarePickDiscard(hd, danger)
+	wantTile := hd[wantIdx]
+
+	updated, _ := m.Update(BotTickMsg{})
+	mu := updated.(Model)
+	northPond := mu.Pond(game.SeatNorth)
+	if len(northPond) == 0 {
+		t.Fatalf("North's pond is empty after BotTickMsg")
+	}
+	got := northPond[len(northPond)-1]
+	if got.ID != wantTile.ID {
+		t.Errorf(
+			"push-mode bot discarded %s, want %s (DangerAwarePickDiscard's pick on the same fixture)",
+			got,
+			wantTile,
+		)
 	}
 }

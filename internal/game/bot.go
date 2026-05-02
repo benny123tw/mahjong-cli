@@ -82,6 +82,12 @@ func isolationScore(selfIdx int, t tile.Tile, hand []tile.Tile) int {
 // so any safe tile beats any unsafe tile regardless of isolation.
 const dangerPenaltyK = 2000
 
+// dangerPenaltyKFold is the fold-mode K value: when the bot has no realistic
+// chance to finish the hand (shanten >= 2 facing a riichi), danger MUST always
+// dominate isolation. 1_000_000 dwarfs the ~1000-range isolation score so the
+// bot picks the safest tile regardless of how connected it is.
+const dangerPenaltyKFold = 1_000_000
+
 // DangerAwarePickDiscard returns the index of the tile to discard when at
 // least one opponent has declared riichi. The score is `isolationScore -
 // dangerPenaltyK * danger[id]`; missing keys are treated as the unsafe
@@ -107,6 +113,38 @@ func (b *Bot) DangerAwarePickDiscard(hand []tile.Tile, danger map[uint8]int) int
 	bestScore := isolationScore(0, hand[0], hand) - dangerPenaltyK*dangerOf(hand[0].ID)
 	for i := 1; i < len(hand); i++ {
 		s := isolationScore(i, hand[i], hand) - dangerPenaltyK*dangerOf(hand[i].ID)
+		switch {
+		case s > bestScore:
+			best, bestScore = i, s
+		case s == bestScore && hand[i].ID < hand[best].ID:
+			best = i
+		}
+	}
+	return best
+}
+
+// FoldDiscard picks the safest discard when the bot is folding — at shanten
+// >= 2 with at least one opponent in riichi. Same shape as
+// DangerAwarePickDiscard but uses dangerPenaltyKFold so danger ALWAYS
+// dominates isolation. Empty danger map → fall back to PickDiscard.
+// Deterministic; consumes no PRNG.
+func (b *Bot) FoldDiscard(hand []tile.Tile, danger map[uint8]int) int {
+	if len(hand) == 0 {
+		return -1
+	}
+	if len(danger) == 0 {
+		return b.PickDiscard(hand)
+	}
+	dangerOf := func(id uint8) int {
+		if v, ok := danger[id]; ok {
+			return v
+		}
+		return 2
+	}
+	best := 0
+	bestScore := isolationScore(0, hand[0], hand) - dangerPenaltyKFold*dangerOf(hand[0].ID)
+	for i := 1; i < len(hand); i++ {
+		s := isolationScore(i, hand[i], hand) - dangerPenaltyKFold*dangerOf(hand[i].ID)
 		switch {
 		case s > bestScore:
 			best, bestScore = i, s

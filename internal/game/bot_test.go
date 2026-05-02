@@ -404,3 +404,51 @@ func TestBotDangerAwarePickDiscardFallsBackToIsolation(t *testing.T) {
 		)
 	}
 }
+
+func TestFoldDiscardPicksGenbutsuOverHigherIsolation(t *testing.T) {
+	// Fold-mode adversarial fixture: P5 is the genbutsu (danger 0); NorthWind
+	// is an unknown-danger honor with max isolation. Push-mode (K=2000) might
+	// pick P5 already, but the test confirms fold-mode does too with full
+	// confidence: K=1_000_000 means danger ALWAYS wins regardless of isolation.
+	hand := []tile.Tile{
+		{ID: tile.P5},
+		{ID: tile.NorthWind},
+	}
+	danger := map[uint8]int{tile.P5: 0}
+
+	b := newDeterministicBot(SeatSouth, 1)
+	idx := b.FoldDiscard(hand, danger)
+	if idx < 0 || idx >= len(hand) {
+		t.Fatalf("FoldDiscard returned out-of-range index %d", idx)
+	}
+	if hand[idx].ID != tile.P5 {
+		t.Errorf(
+			"FoldDiscard chose %s, want 5p (genbutsu must always win in fold mode)",
+			hand[idx],
+		)
+	}
+}
+
+func TestFoldDiscardFallsBackToPickDiscardWhenDangerEmpty(t *testing.T) {
+	hand := []tile.Tile{
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.M4},
+		{ID: tile.P5},
+		{ID: tile.P6},
+		{ID: tile.P7},
+		{ID: tile.S1},
+		{ID: tile.S2},
+		{ID: tile.S3},
+		{ID: tile.M5},
+		{ID: tile.P8},
+		{ID: tile.S5},
+		{ID: tile.S6},
+		{ID: tile.EastWind},
+	}
+	b := newDeterministicBot(SeatSouth, 1)
+	want := b.PickDiscard(hand)
+	if got := b.FoldDiscard(hand, nil); got != want {
+		t.Errorf("FoldDiscard(hand, nil) = %d, want %d (PickDiscard fallback)", got, want)
+	}
+}
