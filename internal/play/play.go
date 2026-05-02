@@ -246,12 +246,18 @@ func (m Model) maybeAdvanceMatch() Model {
 // autoDrawHuman fires a Draw input automatically when state lands on
 // `AwaitingDraw{HumanSeat}` — the human never has to press a key to draw.
 // Standard riichi UX: drawing is automatic, only the discard is a decision.
+// On a successful draw the cursor jumps to the drawn tile (last index)
+// so the player can immediately tsumogiri-discard without arrowing over.
 func (m Model) autoDrawHuman() Model {
 	if m.game == nil {
 		return m
 	}
 	if s, ok := m.game.State().(game.StateAwaitingDraw); ok && s.Player == HumanSeat {
-		_, _ = m.game.Step(game.InputDraw{})
+		if _, err := m.game.Step(game.InputDraw{}); err == nil {
+			if n := len(m.game.Hand(HumanSeat)); n > 0 {
+				m.cursor = n - 1
+			}
+		}
 	}
 	return m
 }

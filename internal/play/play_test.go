@@ -321,6 +321,41 @@ func TestCursorAtIndex13HighlightsDrawnTile(t *testing.T) {
 	}
 }
 
+// TestAutoDrawHumanJumpsCursorToDrawnTile confirms the cursor lands on
+// the drawn tile (last index, after the visual gap) when the human auto-
+// draws. This is the standard riichi UX: tsumogiri (discard the drawn
+// tile) is the most common play, so the cursor should already be there.
+func TestAutoDrawHumanJumpsCursorToDrawnTile(t *testing.T) {
+	g := game.New(7)
+	g.SetTestHand(game.SeatSouth, []tile.Tile{
+		{ID: tile.M1},
+		{ID: tile.M1},
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.P5},
+		{ID: tile.P5},
+		{ID: tile.P6},
+		{ID: tile.P7},
+		{ID: tile.S1},
+		{ID: tile.S1},
+		{ID: tile.Chun},
+		{ID: tile.Chun},
+		{ID: tile.Chun},
+	})
+	g.SetTestState(game.StateAwaitingDraw{Player: game.SeatSouth})
+
+	m := NewWithGame(UnicodeRenderer{}, g)
+	m.cursor = 5
+	m = m.autoDrawHuman()
+
+	if got := len(m.game.Hand(game.SeatSouth)); got != 14 {
+		t.Fatalf("hand length after autoDrawHuman = %d, want 14", got)
+	}
+	if m.cursor != 13 {
+		t.Errorf("cursor after autoDrawHuman = %d, want 13 (drawn tile)", m.cursor)
+	}
+}
+
 // TestBotTickIsNotScheduledWhenHumanHasLegalPon confirms the call-window
 // must wait for the human when they have a legal claim. If isBotTurn
 // returned true unconditionally for StateAwaitingClaims, the 250ms tick
