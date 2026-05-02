@@ -197,9 +197,17 @@ func (m Model) isBotTurn() bool {
 	case game.StateAwaitingDiscard:
 		return s.Player != HumanSeat
 	case game.StateAwaitingClaims:
-		// Claims state involves all non-discarder seats — for simplicity v1
-		// auto-passes on bot claims (real bot pon/chi/ron logic ships in
-		// task 9.x's full bot dispatch path).
+		// In claims state, defer to the human only when they have a legal
+		// pon or chi to consider. Otherwise auto-tick: bots auto-pass in v1
+		// (real bot pon/chi/ron logic ships in add-smart-ai), and there's
+		// nothing for the human to decide.
+		humanHand := m.game.Hand(HumanSeat)
+		if game.CanPon(humanHand, s.Discard) {
+			return false
+		}
+		if len(game.CanChi(humanHand, s.Discard, s.Discarder, HumanSeat)) > 0 {
+			return false
+		}
 		return true
 	}
 	return false

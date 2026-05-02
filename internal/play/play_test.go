@@ -317,6 +317,78 @@ func TestCursorAtIndex13HighlightsDrawnTile(t *testing.T) {
 	}
 }
 
+// TestBotTickIsNotScheduledWhenHumanHasLegalPon confirms the call-window
+// must wait for the human when they have a legal claim. If isBotTurn
+// returned true unconditionally for StateAwaitingClaims, the 250ms tick
+// would auto-pass before the player could press P or C.
+func TestBotTickIsNotScheduledWhenHumanHasLegalPon(t *testing.T) {
+	g := game.New(7)
+	g.SetTestHand(game.SeatSouth, []tile.Tile{
+		{ID: tile.P5},
+		{ID: tile.P5},
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.M4},
+		{ID: tile.M5},
+		{ID: tile.M6},
+		{ID: tile.M7},
+		{ID: tile.M8},
+		{ID: tile.M9},
+		{ID: tile.S1},
+		{ID: tile.S2},
+		{ID: tile.S3},
+	})
+	g.SetTestState(
+		game.StateAwaitingClaims{Discard: tile.Tile{ID: tile.P5}, Discarder: game.SeatEast},
+	)
+
+	m := NewWithGame(UnicodeRenderer{}, g)
+	if cmd := m.Init(); cmd != nil {
+		t.Errorf(
+			"Init() with human-has-legal-pon scheduled a bot tick (cmd != nil); the human's call window must wait for input",
+		)
+	}
+}
+
+// TestBotTickIsScheduledWhenHumanHasNoLegalClaim confirms the auto-tick
+// still fires for claim states the human can't act on, so bot auto-pass
+// advances without manual input.
+func TestBotTickIsScheduledWhenHumanHasNoLegalClaim(t *testing.T) {
+	g := game.New(7)
+	// Human's hand has no copy of the discard and no chi-tiles — nothing
+	// to claim.
+	g.SetTestHand(game.SeatSouth, []tile.Tile{
+		{ID: tile.M1},
+		{ID: tile.M1},
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.P1},
+		{ID: tile.P1},
+		{ID: tile.P2},
+		{ID: tile.P3},
+		{ID: tile.S1},
+		{ID: tile.S1},
+		{ID: tile.S2},
+		{ID: tile.S3},
+		{ID: tile.Haku},
+	})
+	// East's discard is Chun; South can't pon (only one copy in hand? actually
+	// zero copies) and can't chi (Chun is honor). Discarder is West (kamicha
+	// of North, not South), so chi from West would be South's option only
+	// if South is shimocha — South.Kamicha() == East, so chi-from-East is
+	// the only legal chi for South. Use East as discarder of an honor tile.
+	g.SetTestState(
+		game.StateAwaitingClaims{Discard: tile.Tile{ID: tile.Chun}, Discarder: game.SeatEast},
+	)
+
+	m := NewWithGame(UnicodeRenderer{}, g)
+	if cmd := m.Init(); cmd == nil {
+		t.Errorf(
+			"Init() with no-legal-human-claim returned nil cmd; bot tick should be scheduled to auto-pass",
+		)
+	}
+}
+
 func TestBotTickAdvancesBotTurn(t *testing.T) {
 	g := game.New(7)
 	// State is already AwaitingDraw{East} at New; East is a bot.
