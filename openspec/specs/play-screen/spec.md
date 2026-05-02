@@ -35,7 +35,7 @@ The system SHALL expose the play screen via the `mahjong play` cobra subcommand 
 ---
 ### Requirement: Play Screen Layout
 
-The system SHALL render a play layout at fixed 80 columns by 24 rows containing the following regions in documented fixed positions: a status line at the top; a toimen (opposite seat) horizontal tile-back row plus seat label; **four per-seat discard zones** — one for each seat (toimen above, your zone below, kamicha on the left, shimocha on the right) — each rendering up to 12 most-recent discards in 6-wide sub-rows, with older discards scrolling off the top with a `+N earlier` indicator; a centre region showing round wind, honba count, wall-remaining count, and the active dora indicator tile; the player's hand at the bottom with a cursor highlight; and an action button row footer that doubles as the call-window prompt when applicable.
+The system SHALL render a play layout at fixed 80 columns by 24 rows containing the following regions in documented fixed positions: a status line at the top; a toimen (opposite seat) horizontal tile-back row plus seat label; **four per-seat discard zones** — one for each seat (toimen above, your zone below, kamicha on the left, shimocha on the right) — each rendering up to 12 most-recent discards in 6-wide sub-rows, with older discards scrolling off the top with a `+N earlier` indicator; a centre region showing round wind, honba count, wall-remaining count, and the active dora indicator tile; the player's hand at the bottom, rendered as a sorted 13-tile main row with the just-drawn 14th tile visually separated at the right end by a single tile-slot gap when the state is `AwaitingDiscard{Human}`; and an action button row footer that doubles as the call-window prompt when applicable.
 
 #### Scenario: All regions render at sufficient terminal size
 
@@ -66,6 +66,40 @@ The system SHALL render a play layout at fixed 80 columns by 24 rows containing 
 - **WHEN** the View renders the toimen discard zone
 - **THEN** the zone shows the 12 most recent discards (2 sub-rows of 6)
 - **AND** a `+2 earlier` indicator marks that older discards exist
+
+#### Scenario: Drawn tile is visually separated from the sorted main hand
+
+- **GIVEN** the underlying state is `AwaitingDiscard{Human}` and the human's hand has 14 tiles (13 sorted + the just-drawn tile at index 13)
+- **WHEN** the View renders the hand region
+- **THEN** the leftmost 13 tiles render densely as one block in canonical sort order
+- **AND** a one-tile-slot horizontal gap appears between the 13th rendered tile and the 14th tile
+- **AND** the 14th tile renders alone at the rightmost slot
+
+##### Example: gap layout in Unicode mode
+
+- **GIVEN** sorted hand `[1m, 1m, 2m, 3m, 5p, 5p, 6p, 7p, 1s, 1s, 7z, 7z, 7z]` and drawn tile `4m`
+- **WHEN** the View renders the hand region
+- **THEN** the rendered string is the 13 sorted tiles glued together with no separator (each tile being `<glyph><VS-15> ` per the Tile Rendering Strategy), then a single empty tile-slot of horizontal whitespace, then the rendered drawn tile `4m`
+
+#### Scenario: No gap when not in AwaitingDiscard
+
+- **GIVEN** the underlying state is `AwaitingClaims`, `AwaitingDraw`, or `RoundOver`, with the human's hand at exactly 13 tiles
+- **WHEN** the View renders the hand region
+- **THEN** all 13 tiles render densely with no gap; the drawn-tile separator only appears in `AwaitingDiscard{Human}`
+
+
+<!-- @trace
+source: add-hand-sort
+updated: 2026-05-02
+code:
+  - internal/game/turn.go
+  - internal/game/state.go
+  - testdata/game/golden/seed-42.json
+  - internal/play/play.go
+tests:
+  - internal/play/play_test.go
+  - internal/game/sort_test.go
+-->
 
 ---
 ### Requirement: Window Size Captured On Model

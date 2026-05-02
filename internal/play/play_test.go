@@ -137,6 +137,186 @@ func TestSpaceInCallWindowRecordsPass(t *testing.T) {
 	}
 }
 
+// TestRenderHandInsertsGapBeforeDrawnTile confirms the Play Screen Layout
+// drawn-tile separator: in AwaitingDiscard{Human} with 14 tiles, the rendered
+// hand shows the leftmost 13 densely concatenated, then a one-tile-slot gap
+// of horizontal whitespace, then the 14th tile.
+func TestRenderHandInsertsGapBeforeDrawnTile(t *testing.T) {
+	g := game.New(7)
+	g.SetTestHand(game.SeatSouth, []tile.Tile{
+		// 13 sorted tiles
+		{ID: tile.M1},
+		{ID: tile.M1},
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.P5},
+		{ID: tile.P5},
+		{ID: tile.P6},
+		{ID: tile.P7},
+		{ID: tile.S1},
+		{ID: tile.S1},
+		{ID: tile.Chun},
+		{ID: tile.Chun},
+		{ID: tile.Chun},
+		// drawn 14th
+		{ID: tile.M4},
+	})
+	g.SetTestState(game.StateAwaitingDiscard{Player: game.SeatSouth})
+
+	r := UnicodeRenderer{}
+	m := NewWithGame(r, g)
+	rendered := m.renderHand()
+
+	// The drawn tile (M4) renders as `<glyph><vs15> ` — find the rightmost
+	// occurrence and confirm there is at least Width() whitespace cells
+	// immediately before it (the gap), in addition to the previous tile's
+	// own trailing space.
+	drawnGlyph := r.Tile(tile.Tile{ID: tile.M4})[0]
+	idx := strings.LastIndex(rendered, drawnGlyph)
+	if idx < 0 {
+		t.Fatalf("rendered hand missing drawn tile glyph: rendered=%q", rendered)
+	}
+	prefix := rendered[:idx]
+	trailing := 0
+	for i := len(prefix) - 1; i >= 0; i-- {
+		if prefix[i] == ' ' {
+			trailing++
+			continue
+		}
+		break
+	}
+	// Width() cells of inserted gap PLUS the previous tile's own trailing
+	// space = at least Width() + 1 trailing whitespace before the drawn
+	// tile's glyph.
+	want := r.Width() + 1
+	if trailing < want {
+		t.Errorf(
+			"AwaitingDiscard{Human}: expected ≥%d trailing whitespace before drawn tile, got %d. rendered=%q",
+			want,
+			trailing,
+			rendered,
+		)
+	}
+}
+
+// TestRenderHandNoGapWhenNotAwaitingDiscard confirms the gap separator only
+// appears in AwaitingDiscard{Human}: a 13-tile hand in AwaitingDraw or any
+// other state SHALL render densely with no gap.
+func TestRenderHandNoGapWhenNotAwaitingDiscard(t *testing.T) {
+	g := game.New(7)
+	g.SetTestHand(game.SeatSouth, []tile.Tile{
+		{ID: tile.M1},
+		{ID: tile.M1},
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.P5},
+		{ID: tile.P5},
+		{ID: tile.P6},
+		{ID: tile.P7},
+		{ID: tile.S1},
+		{ID: tile.S1},
+		{ID: tile.Chun},
+		{ID: tile.Chun},
+		{ID: tile.Chun},
+	})
+	g.SetTestState(game.StateAwaitingDraw{Player: game.SeatSouth})
+
+	r := UnicodeRenderer{}
+	m := NewWithGame(r, g)
+	rendered := m.renderHand()
+
+	// Each tile rendered ends with a single trailing space (built into
+	// UnicodeRenderer.Tile). A run of ≥ Width()+1 consecutive whitespace
+	// would indicate a gap was inserted; that should NOT happen here.
+	maxRun := 0
+	cur := 0
+	for i := 0; i < len(rendered); i++ {
+		if rendered[i] == ' ' {
+			cur++
+			if cur > maxRun {
+				maxRun = cur
+			}
+			continue
+		}
+		cur = 0
+	}
+	if maxRun > r.Width() {
+		t.Errorf(
+			"AwaitingDraw with 13-tile hand: found whitespace run of %d (>Width()=%d), expected dense rendering with no gap. rendered=%q",
+			maxRun,
+			r.Width(),
+			rendered,
+		)
+	}
+}
+
+// TestCursorAtIndex13HighlightsDrawnTile confirms cursor handling still
+// works after the drawn-tile gap renders: moving the cursor to index 13
+// highlights the 14th (drawn) tile, not the gap.
+func TestCursorAtIndex13HighlightsDrawnTile(t *testing.T) {
+	g := game.New(7)
+	g.SetTestHand(game.SeatSouth, []tile.Tile{
+		{ID: tile.M1},
+		{ID: tile.M1},
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.P5},
+		{ID: tile.P5},
+		{ID: tile.P6},
+		{ID: tile.P7},
+		{ID: tile.S1},
+		{ID: tile.S1},
+		{ID: tile.Chun},
+		{ID: tile.Chun},
+		{ID: tile.Chun},
+		{ID: tile.M4},
+	})
+	g.SetTestState(game.StateAwaitingDiscard{Player: game.SeatSouth})
+
+	r := UnicodeRenderer{}
+	m := NewWithGame(r, g)
+	// Move cursor to the rightmost (drawn) tile.
+	for range 13 {
+		updated, _ := m.Update(tea.KeyPressMsg{Code: 'l'})
+		m = updated.(Model)
+	}
+	if m.cursor != 13 {
+		t.Fatalf("cursor after 13 right-moves = %d, want 13", m.cursor)
+	}
+
+	rendered := m.renderHand()
+	// focusedTileStyle injects ANSI escape `\x1b[` before the highlighted
+	// tile glyph. Since cursor=13, that escape should appear immediately
+	// before the drawn-tile glyph (M4), not before any of the leftmost 13.
+	drawnGlyph := r.Tile(tile.Tile{ID: tile.M4})[0]
+	drawnIdx := strings.LastIndex(rendered, drawnGlyph)
+	if drawnIdx < 0 {
+		t.Fatalf("drawn tile glyph missing from rendered output: %q", rendered)
+	}
+	// Find the most recent ANSI start before drawnIdx.
+	prefix := rendered[:drawnIdx]
+	lastEsc := strings.LastIndex(prefix, "\x1b[")
+	if lastEsc < 0 {
+		t.Fatalf("no ANSI escape before drawn tile (expected cursor highlight): %q", rendered)
+	}
+	// Between lastEsc and drawnIdx there should be only the escape sequence
+	// (ending in 'm') — no other tile glyphs. A simple check: no other
+	// glyphs from the leftmost 13 should appear after lastEsc.
+	tail := prefix[lastEsc:]
+	for _, want := range []string{
+		r.Tile(tile.Tile{ID: tile.Chun})[0],
+		r.Tile(tile.Tile{ID: tile.S1})[0],
+	} {
+		if strings.Contains(tail, want) {
+			t.Errorf(
+				"cursor's ANSI escape appears too early — tile %q renders between escape and drawn tile, suggests cursor lands in gap. rendered=%q",
+				want,
+				rendered,
+			)
+		}
+	}
+}
+
 func TestBotTickAdvancesBotTurn(t *testing.T) {
 	g := game.New(7)
 	// State is already AwaitingDraw{East} at New; East is a bot.

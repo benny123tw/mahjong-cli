@@ -571,16 +571,51 @@ func (m Model) renderPlayerPond() string {
 
 func (m Model) renderHand() string {
 	tiles := m.Hand()
-	cells := make([]string, len(tiles))
+	cells := make([]string, 0, len(tiles)+1)
 	for i, t := range tiles {
 		tileLines := m.renderer.Tile(t)
 		tileBlock := strings.Join(tileLines, "\n")
 		if i == m.cursor {
 			tileBlock = focusedTileStyle.Render(tileBlock)
 		}
-		cells[i] = tileBlock
+		// In AwaitingDiscard{Human} with 14 tiles, the just-drawn 14th tile
+		// lives at index 13 and SHALL be visually separated from the sorted
+		// main hand by a one-tile-slot gap (game-loop spec, Human Hand
+		// Canonical Sort Invariant). The gap is rendered as Width() spaces
+		// per row, matching the renderer's tile cell count.
+		if i == 13 && m.shouldShowDrawnTileGap(len(tiles)) {
+			cells = append(cells, m.handGap())
+		}
+		cells = append(cells, tileBlock)
 	}
 	return lipgloss.JoinHorizontal(lipgloss.Top, cells...)
+}
+
+// shouldShowDrawnTileGap reports whether the drawn-tile gap separator should
+// be inserted between indices 12 and 13 of the human's hand. The gap appears
+// only when the underlying state is AwaitingDiscard{Human} AND the hand has
+// 14 tiles (a draw has just landed and the player has not yet discarded).
+func (m Model) shouldShowDrawnTileGap(handLen int) bool {
+	if handLen != 14 || m.game == nil {
+		return false
+	}
+	st, ok := m.game.State().(game.StateAwaitingDiscard)
+	return ok && st.Player == HumanSeat
+}
+
+// handGap returns a lipgloss block of Width()×Lines() whitespace, used as
+// the visual separator between the sorted main hand and the drawn 14th tile.
+func (m Model) handGap() string {
+	width, lines := m.renderer.Width(), m.renderer.Lines()
+	row := strings.Repeat(" ", width)
+	if lines <= 1 {
+		return row
+	}
+	rows := make([]string, lines)
+	for i := range rows {
+		rows[i] = row
+	}
+	return strings.Join(rows, "\n")
 }
 
 func (m Model) renderFooter() string {

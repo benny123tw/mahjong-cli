@@ -1,8 +1,10 @@
 package game
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/benny123tw/mahjong-cli/internal/riichi/calc"
 	"github.com/benny123tw/mahjong-cli/internal/riichi/hand"
@@ -78,8 +80,23 @@ func New(seed int64) *Game {
 	for seat := range numSeats {
 		g.hands[seat] = deal.Hands[seat]
 	}
+	sortConcealed(g.hands[HumanSeat])
 	g.logf("deal seed=%d dora=%s", seed, deal.DoraIndicator)
 	return g
+}
+
+// sortConcealed sorts a tile slice in-place by ascending tile-ID, which is
+// the canonical riichi order: M1..M9, P1..P9, S1..S9, EastWind, SouthWind,
+// WestWind, NorthWind, Haku, Hatsu, Chun. The tile package's iota-defined
+// IDs are already laid out in this order, so a stable ID sort is canonical.
+//
+// Stable so tied IDs (e.g., two of the same tile, or a red five vs a normal
+// five sharing an ID) keep their relative order — useful when the player
+// has just slotted a freshly-drawn tile into an existing pair.
+func sortConcealed(tiles []tile.Tile) {
+	slices.SortStableFunc(tiles, func(a, b tile.Tile) int {
+		return cmp.Compare(a.ID, b.ID)
+	})
 }
 
 // Seed returns the seed used to construct this game. Useful for printing
@@ -196,6 +213,9 @@ func (g *Game) stepFromAwaitingDiscard(s StateAwaitingDiscard, in Input) (Event,
 		g.hands[s.Player] = append(g.hands[s.Player][:v.Index], g.hands[s.Player][v.Index+1:]...)
 		g.discards[s.Player] = append(g.discards[s.Player], t)
 		g.hasDiscarded[s.Player] = true
+		if s.Player == HumanSeat {
+			sortConcealed(g.hands[s.Player])
+		}
 		g.logf("discard %s %s", seatName(s.Player), t)
 		g.state = StateAwaitingClaims{Discard: t, Discarder: s.Player}
 		return EventNop{}, nil
@@ -279,6 +299,9 @@ func (g *Game) stepFromAwaitingClaims(s StateAwaitingClaims, in Input) (Event, e
 		// Pop the discard from discarder's pond — it's been called.
 		g.popLastDiscard(s.Discarder)
 		g.callsHappened = true
+		if winner == HumanSeat {
+			sortConcealed(g.hands[winner])
+		}
 		g.logf("pon %s from %s on %s", seatName(winner), seatName(s.Discarder), s.Discard)
 		g.state = StateAwaitingDiscard{Player: winner}
 		return EventNop{}, nil
@@ -304,6 +327,9 @@ func (g *Game) stepFromAwaitingClaims(s StateAwaitingClaims, in Input) (Event, e
 		})
 		g.popLastDiscard(s.Discarder)
 		g.callsHappened = true
+		if winner == HumanSeat {
+			sortConcealed(g.hands[winner])
+		}
 		g.logf("chi %s from %s on %s", seatName(winner), seatName(s.Discarder), s.Discard)
 		g.state = StateAwaitingDiscard{Player: winner}
 		return EventNop{}, nil

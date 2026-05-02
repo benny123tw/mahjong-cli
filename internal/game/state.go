@@ -17,6 +17,12 @@ const (
 	SeatNorth
 )
 
+// HumanSeat is the seat the human player occupies. The engine maintains a
+// canonical-sort invariant on this seat's concealed hand (see sortConcealed).
+// Bot seats' hands are never sorted by the engine — bot decision logic is
+// order-independent.
+const HumanSeat = SeatSouth
+
 // SeatWind returns the wind tile ID for this seat. East=27 .. North=30.
 func (s Seat) SeatWind() uint8 {
 	return tile.EastWind + uint8(s)
