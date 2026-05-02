@@ -1,4 +1,4 @@
 Shanten: -1 (winning)
-Yaku: Toitoi (2), Chinitsu (6), Sanankou (2)
+Yaku: Suuankou (13)
 Fu: 60
-Han: 10  Fu: 60  Points: 16000 (non-dealer ron: 16000)
+Han: 13  Fu: 60  Points: 32000 (non-dealer ron: 32000)

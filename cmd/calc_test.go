@@ -85,11 +85,11 @@ func TestCalc_Golden_TenpaiNotShanten2(t *testing.T) {
 	compareGolden(t, "shanten2_not_tenpai", stdout)
 }
 
-// Smoke-test hand from the discussion that triggered Group A. Exercises
-// chinitsu (6 han) + toitoi (2) + sanankou (2). Note: by full riichi rules
-// this hand is actually suuankou yakuman (4 concealed triplets, tanki wait
-// on the pair makes ron-suuankou valid too) — but suuankou is deferred to
-// Group B, so v1 reports the constituent normal-han yaku instead.
+// Smoke-test hand from the discussion that triggered Group A. The hand
+// 1m1m1m4m4m4m7m7m7m9m9m9m5m5m is four concealed triplets plus a 5m pair,
+// tanki-ron on 5m — by full riichi rules that's Suuankou yakuman (the
+// kan-aware Group D detector now fires; pre-Group-D this reported
+// chinitsu + toitoi + sanankou as constituent normal-han yaku).
 func TestCalc_Golden_SmokeTestChinitsuToitoiSanankou(t *testing.T) {
 	stdout, _, err := runWithArgs(t, []string{
 		"calc", "1m1m1m4m4m4m7m7m7m9m9m9m5m5m",

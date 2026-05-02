@@ -392,10 +392,11 @@ func (g *Game) stepFromAwaitingDiscard(s StateAwaitingDiscard, in Input) (Event,
 			return nil, ErrIllegalDiscard
 		}
 		h := hand.Hand{
-			Concealed: concealed,
-			Winning:   winning,
-			IsTsumo:   true,
-			Open:      g.IsHandOpen(s.Player),
+			Concealed:   concealed,
+			Winning:     winning,
+			IsTsumo:     true,
+			Open:        g.IsHandOpen(s.Player),
+			CalledMelds: g.calledMeldsFor(s.Player),
 		}
 		ctx := g.contextForWin(s.Player, true)
 		result := calc.Analyze(h, ctx)
@@ -458,10 +459,11 @@ func (g *Game) stepFromAwaitingClaims(s StateAwaitingClaims, in Input) (Event, e
 		concealed := g.effectiveConcealed(winner)
 		concealed = append(concealed, s.Discard)
 		h := hand.Hand{
-			Concealed: concealed,
-			Winning:   s.Discard,
-			IsTsumo:   false,
-			Open:      g.IsHandOpen(winner),
+			Concealed:   concealed,
+			Winning:     s.Discard,
+			IsTsumo:     false,
+			Open:        g.IsHandOpen(winner),
+			CalledMelds: g.calledMeldsFor(winner),
 		}
 		ctx := g.contextForWin(winner, false)
 		result := calc.Analyze(h, ctx)
@@ -573,10 +575,11 @@ func (g *Game) stepFromAwaitingChankan(s StateAwaitingChankan, in Input) (Event,
 		concealed := g.effectiveConcealed(winner)
 		concealed = append(concealed, s.UpgradeTile)
 		h := hand.Hand{
-			Concealed: concealed,
-			Winning:   s.UpgradeTile,
-			IsTsumo:   false,
-			Open:      g.IsHandOpen(winner),
+			Concealed:   concealed,
+			Winning:     s.UpgradeTile,
+			IsTsumo:     false,
+			Open:        g.IsHandOpen(winner),
+			CalledMelds: g.calledMeldsFor(winner),
 		}
 		ctx := g.contextForWin(winner, false)
 		result := calc.Analyze(h, ctx)
@@ -826,6 +829,40 @@ func (g *Game) effectiveConcealed(s Seat) []tile.Tile {
 		for i := 0; i < 3 && i < len(m.Tiles); i++ {
 			out = append(out, m.Tiles[i])
 		}
+	}
+	return out
+}
+
+// calledMeldsFor projects the seat's engine-side melds into the hand-package
+// view (`hand.CalledMeld`) used by kan-aware yaku detectors. The mapping is
+// fixed: pon → CalledPon, chi → CalledChi, ankan → CalledAnkan,
+// minkan → CalledMinkan, shouminkan → CalledShouminkan. BaseID is the meld's
+// first tile ID.
+func (g *Game) calledMeldsFor(s Seat) []hand.CalledMeld {
+	if len(g.melds[s]) == 0 {
+		return nil
+	}
+	out := make([]hand.CalledMeld, 0, len(g.melds[s]))
+	for _, m := range g.melds[s] {
+		var k hand.CalledKind
+		switch m.Kind {
+		case MeldPon:
+			k = hand.CalledPon
+		case MeldChi:
+			k = hand.CalledChi
+		case MeldKan:
+			switch m.KanKind {
+			case KanAnkan:
+				k = hand.CalledAnkan
+			case KanMinkan:
+				k = hand.CalledMinkan
+			case KanShouminkan:
+				k = hand.CalledShouminkan
+			default:
+				k = hand.CalledMinkan
+			}
+		}
+		out = append(out, hand.CalledMeld{Kind: k, BaseID: m.Tiles[0].ID})
 	}
 	return out
 }

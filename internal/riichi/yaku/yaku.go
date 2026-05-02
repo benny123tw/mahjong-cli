@@ -71,7 +71,81 @@ func Detectors() []Detector {
 		detectHoutei,
 		detectRinshan,
 		detectChankan,
+		detectSankantsu,
+		detectSuukantsu,
+		detectSuuankou,
 	}
+}
+
+// --- Group D: kan-aware yaku.
+
+// kanCount returns the number of kan-kind CalledMelds (ankan, minkan, or
+// shouminkan) on the winning hand. Used by sankantsu/suukantsu detectors.
+func kanCount(h hand.Hand) int {
+	n := 0
+	for _, cm := range h.CalledMelds {
+		switch cm.Kind {
+		case hand.CalledAnkan, hand.CalledMinkan, hand.CalledShouminkan:
+			n++
+		}
+	}
+	return n
+}
+
+func detectSankantsu(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if kanCount(h) != 3 {
+		return nil
+	}
+	return []Match{{Name: "Sankantsu", Han: 2}}
+}
+
+func detectSuukantsu(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if kanCount(h) != 4 {
+		return nil
+	}
+	return []Match{{Name: "Suukantsu", Han: 13, IsYakuman: true}}
+}
+
+// suuankouTripletConcealed determines whether the triplet at base ID `B`
+// counts as concealed for suuankou. A called pon/minkan/shouminkan at B
+// makes it open; an ankan at B keeps it concealed; no called meld at B
+// means the triplet was formed from concealed tiles. Additionally, when
+// the win is by ron on a tile equal to B AND the wait is shanpon (pair
+// base != B), the triplet is downgraded to open per riichi convention.
+func suuankouTripletConcealed(b uint8, h hand.Hand, pairBase uint8) bool {
+	for _, cm := range h.CalledMelds {
+		if cm.BaseID != b {
+			continue
+		}
+		switch cm.Kind {
+		case hand.CalledPon, hand.CalledMinkan, hand.CalledShouminkan:
+			return false
+		}
+	}
+	if !h.IsTsumo && h.Winning.ID == b && b != pairBase {
+		return false
+	}
+	return true
+}
+
+func detectSuuankou(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if d.Form != hand.FormStandard {
+		return nil
+	}
+	pairBase := d.Pair().Base
+	concealedTriplets := 0
+	for _, m := range d.Sets() {
+		if m.Kind != hand.MeldTriplet {
+			return nil
+		}
+		if suuankouTripletConcealed(m.Base, h, pairBase) {
+			concealedTriplets++
+		}
+	}
+	if concealedTriplets != 4 {
+		return nil
+	}
+	return []Match{{Name: "Suuankou", Han: 13, IsYakuman: true}}
 }
 
 // Evaluate runs every detector and returns the matched yaku for one
@@ -116,6 +190,29 @@ func Evaluate(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
 		filtered := all[:0]
 		for _, m := range all {
 			if m.Name == "Riichi" {
+				continue
+			}
+			filtered = append(filtered, m)
+		}
+		all = filtered
+	}
+
+	// Suuankou supersedes Sanankou: when both match the same evaluation,
+	// drop the sanankou line. The yakuman filter below would also drop
+	// sanankou (suuankou is yakuman, sanankou is not), but the explicit
+	// rule mirrors the ryanpeikou/double-riichi supersession blocks and
+	// stays correct if the yakuman filter is later relaxed.
+	hasSuuankou := false
+	for _, m := range all {
+		if m.Name == "Suuankou" {
+			hasSuuankou = true
+			break
+		}
+	}
+	if hasSuuankou {
+		filtered := all[:0]
+		for _, m := range all {
+			if m.Name == "Sanankou" {
 				continue
 			}
 			filtered = append(filtered, m)

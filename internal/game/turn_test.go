@@ -3,6 +3,7 @@ package game
 import (
 	"testing"
 
+	"github.com/benny123tw/mahjong-cli/internal/riichi/hand"
 	"github.com/benny123tw/mahjong-cli/internal/riichi/tile"
 )
 
@@ -82,5 +83,71 @@ func TestLegacyNewDelegatesToNewWithDealer(t *testing.T) {
 	st, ok := g.State().(StateAwaitingDraw)
 	if !ok || st.Player != SeatEast {
 		t.Errorf("New(7) initial state = %v, want AwaitingDraw{East}", g.State())
+	}
+}
+
+func TestContextForWinPopulatesCalledMelds(t *testing.T) {
+	g := New(7)
+	// Concealed: 234m + 234p + 234s + 2m + 2m (11 tiles, pair-completing
+	// rinshan replacement at the end). Open ankan on 5p contributes 3 tiles
+	// to effectiveConcealed; open pon on 7s contributes 3 tiles. The 14-tile
+	// shape (11 concealed + 3 ankan) doesn't include the pon yet — we need
+	// 11 concealed + 3 ankan + 3 pon = 17. That overshoots, so use a 8-tile
+	// concealed hand: 234m + 234p + 2m + 2m (8 tiles), plus ankan(5p)=3 and
+	// pon(7s)=3 totals 14. Sets: 2m3m4m, 2p3p4p, 5p5p5p ankan, 7s7s7s pon,
+	// pair 2m2m. Winning tile is the second 2m (last in slice).
+	g.testSetHand(SeatEast, []tile.Tile{
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.M4},
+		{ID: tile.P2},
+		{ID: tile.P3},
+		{ID: tile.P4},
+		{ID: tile.M2},
+		{ID: tile.M2},
+	})
+	g.melds[SeatEast] = []Meld{
+		{
+			Kind:    MeldKan,
+			KanKind: KanAnkan,
+			Tiles:   []tile.Tile{{ID: tile.P5}, {ID: tile.P5}, {ID: tile.P5}, {ID: tile.P5}},
+		},
+		{
+			Kind:  MeldPon,
+			Tiles: []tile.Tile{{ID: tile.S7}, {ID: tile.S7}, {ID: tile.S7}},
+			From:  SeatSouth,
+		},
+	}
+	g.testSetState(StateAwaitingDiscard{Player: SeatEast})
+
+	_, err := g.Step(InputDeclareTsumo{})
+	if err != nil {
+		t.Fatalf("Step(tsumo) returned err: %v", err)
+	}
+	st, ok := g.State().(StateRoundOver)
+	if !ok {
+		t.Fatalf("state after tsumo = %T, want StateRoundOver", g.State())
+	}
+	out, ok := st.Outcome.(OutcomeTsumo)
+	if !ok {
+		t.Fatalf("outcome after tsumo = %T, want OutcomeTsumo", st.Outcome)
+	}
+
+	if got := len(out.Hand.CalledMelds); got != 2 {
+		t.Fatalf("Hand.CalledMelds len = %d, want 2", got)
+	}
+	want := map[hand.CalledKind]uint8{
+		hand.CalledAnkan: tile.P5,
+		hand.CalledPon:   tile.S7,
+	}
+	for _, cm := range out.Hand.CalledMelds {
+		baseID, ok := want[cm.Kind]
+		if !ok {
+			t.Errorf("unexpected CalledMeld.Kind = %d", cm.Kind)
+			continue
+		}
+		if cm.BaseID != baseID {
+			t.Errorf("CalledMeld{Kind=%d}.BaseID = %d, want %d", cm.Kind, cm.BaseID, baseID)
+		}
 	}
 }

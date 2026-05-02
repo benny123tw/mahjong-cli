@@ -215,7 +215,10 @@ func TestYaku_Iipeikou_NotInChiitoitsu(t *testing.T) {
 }
 
 func TestYaku_Toitoi(t *testing.T) {
-	h := mustHand(t, "1m1m1m4m4m4m7p7p7p2s2s2s5p5p", "5p")
+	// Winning tile on a triplet (shanpon-ron) downgrades that triplet for
+	// suuankou-counting; without this, the 4-concealed-triplet shape would
+	// trip Suuankou yakuman and the yakuman filter would mask Toitoi.
+	h := mustHand(t, "1m1m1m4m4m4m7p7p7p2s2s2s5p5p", "2s")
 	for _, ms := range evaluateAll(h, southEastCtx()) {
 		if haveYaku(ms, "Toitoi") {
 			return
@@ -344,7 +347,10 @@ func flattenMatches(in [][]Match) []Match {
 // --- Group A fixtures.
 
 func TestYaku_Chinitsu(t *testing.T) {
-	h := mustHand(t, "1m1m1m4m4m4m7m7m7m9m9m9m5m5m", "5m")
+	// Winning tile on a triplet base (shanpon-ron) avoids inadvertently
+	// triggering Suuankou — the 4-concealed-triplet shape with tanki-ron
+	// on the pair would trip the yakuman filter and mask Chinitsu.
+	h := mustHand(t, "1m1m1m4m4m4m7m7m7m9m9m9m5m5m", "1m")
 	matches := flattenMatches(evaluateAll(h, southEastCtx()))
 	for _, m := range matches {
 		if m.Name == "Chinitsu" {
@@ -358,7 +364,7 @@ func TestYaku_Chinitsu(t *testing.T) {
 }
 
 func TestYaku_Chinitsu_OpenDowngrade(t *testing.T) {
-	h := mustHand(t, "1m1m1m4m4m4m7m7m7m9m9m9m5m5m", "5m", withOpen())
+	h := mustHand(t, "1m1m1m4m4m4m7m7m7m9m9m9m5m5m", "1m", withOpen())
 	matches := flattenMatches(evaluateAll(h, southEastCtx()))
 	for _, m := range matches {
 		if m.Name == "Chinitsu" {
@@ -715,5 +721,99 @@ func TestYaku_Chankan_DormantUntilFlagSet(t *testing.T) {
 	matches = flattenMatches(evaluateAll(h, ctx))
 	if haveYaku(matches, "Chankan") {
 		t.Errorf("Chankan must not match when flag is off (always false in v1): %+v", matches)
+	}
+}
+
+// --- Group D: kan-aware yaku (sankantsu, suukantsu, suuankou).
+
+func TestDetectSankantsuThreeKansAnyKind(t *testing.T) {
+	// 14-tile flattened bag: 1m1m1m + 9m9m9m + 5p5p5p (three kans, contributing 3 each)
+	// + 7s7s7s (concealed triplet) + 3p3p (pair). The decomposition sees five
+	// triplets-shaped sets; CalledMelds tells the detector that three of them
+	// were really kans. Winning tile = the last 7s (tsumo on that triplet).
+	h := mustHand(t, "1m1m1m9m9m9m5p5p5p7s7s7s3p3p", "7s", withTsumo())
+	h.CalledMelds = []hand.CalledMeld{
+		{Kind: hand.CalledAnkan, BaseID: tile.M1},
+		{Kind: hand.CalledMinkan, BaseID: tile.M9},
+		{Kind: hand.CalledShouminkan, BaseID: tile.P5},
+	}
+	matches := flattenMatches(evaluateAll(h, southEastCtx()))
+	if !haveYaku(matches, "Sankantsu") {
+		t.Errorf("Sankantsu must match for 3 kans: %+v", matches)
+	}
+	for _, m := range matches {
+		if m.Name == "Sankantsu" && m.Han != 2 {
+			t.Errorf("Sankantsu Han = %d, want 2", m.Han)
+		}
+	}
+}
+
+func TestDetectSuukantsuFourKansYakuman(t *testing.T) {
+	// Four kans (any mix). The flattened bag carries 4×3 = 12 tiles for the
+	// kans plus the pair. Winning tile completes the pair (tanki on 3p).
+	h := mustHand(t, "1m1m1m9m9m9m5p5p5p5s5s5s3p3p", "3p", withTsumo())
+	h.CalledMelds = []hand.CalledMeld{
+		{Kind: hand.CalledAnkan, BaseID: tile.M1},
+		{Kind: hand.CalledMinkan, BaseID: tile.M9},
+		{Kind: hand.CalledShouminkan, BaseID: tile.P5},
+		{Kind: hand.CalledAnkan, BaseID: tile.S5},
+	}
+	matches := flattenMatches(evaluateAll(h, southEastCtx()))
+	if !haveYaku(matches, "Suukantsu") {
+		t.Errorf("Suukantsu must match for 4 kans: %+v", matches)
+	}
+	if haveYaku(matches, "Sankantsu") {
+		t.Errorf("Sankantsu must NOT also match when Suukantsu is present: %+v", matches)
+	}
+	for _, m := range matches {
+		if m.Name == "Suukantsu" && !m.IsYakuman {
+			t.Errorf("Suukantsu IsYakuman = false, want true")
+		}
+	}
+}
+
+func TestDetectSuuankouFourAnkansTsumo(t *testing.T) {
+	// Four ankans (1m, 4m, 7m, 9m) + pair 5m. Bag = 4×3 + 2 = 14 tiles.
+	// Win is tsumo on the 14th tile (a 5m completing the pair / tanki).
+	h := mustHand(t, "1m1m1m4m4m4m7m7m7m9m9m9m5m5m", "5m", withTsumo())
+	h.CalledMelds = []hand.CalledMeld{
+		{Kind: hand.CalledAnkan, BaseID: tile.M1},
+		{Kind: hand.CalledAnkan, BaseID: tile.M4},
+		{Kind: hand.CalledAnkan, BaseID: tile.M7},
+		{Kind: hand.CalledAnkan, BaseID: tile.M9},
+	}
+	matches := flattenMatches(evaluateAll(h, southEastCtx()))
+	if !haveYaku(matches, "Suuankou") {
+		t.Errorf("Suuankou must match for 4 ankans tsumo: %+v", matches)
+	}
+	for _, m := range matches {
+		if m.Name == "Suuankou" && !m.IsYakuman {
+			t.Errorf("Suuankou IsYakuman = false, want true")
+		}
+	}
+}
+
+func TestDetectSuuankouRonOnShanponDisables(t *testing.T) {
+	// Fully concealed (no CalledMelds): four triplets + pair, ron-on-shanpon.
+	// Hand 1m×3 4m×3 7m×3 5m×3 9m×2 with winning tile 5m completing the 5m
+	// triplet via shanpon. Pair is 9m. Suuankou must NOT match. Sanankou
+	// MUST match (three other triplets remain concealed).
+	h := mustHand(t, "1m1m1m4m4m4m7m7m7m5m5m5m9m9m", "5m")
+	matches := flattenMatches(evaluateAll(h, southEastCtx()))
+	if haveYaku(matches, "Suuankou") {
+		t.Errorf("Suuankou must NOT match on shanpon-ron: %+v", matches)
+	}
+	if !haveYaku(matches, "Sanankou") {
+		t.Errorf("Sanankou must match (3 concealed triplets remain): %+v", matches)
+	}
+}
+
+func TestDetectSuuankouRonOnTankiPreserves(t *testing.T) {
+	// Fully concealed: 1m×3 4m×3 7m×3 9m×3 + pair 5m. Winning tile 5m
+	// completes the pair (tanki-ron). All four triplets remain concealed.
+	h := mustHand(t, "1m1m1m4m4m4m7m7m7m9m9m9m5m5m", "5m")
+	matches := flattenMatches(evaluateAll(h, southEastCtx()))
+	if !haveYaku(matches, "Suuankou") {
+		t.Errorf("Suuankou must match on tanki-ron with 4 concealed triplets: %+v", matches)
 	}
 }

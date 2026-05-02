@@ -23,6 +23,34 @@ type Hand struct {
 	Open      bool
 	Winning   tile.Tile
 	IsTsumo   bool
+
+	// CalledMelds records the player's called/declared melds at agari time
+	// for kan-aware yaku (sankantsu, suukantsu, suuankou). The Concealed
+	// slice still represents the 14-tile decomposition view (kan's 4th
+	// tile is dropped — see Game.effectiveConcealed); CalledMelds carries
+	// the metadata that flattening loses. Zero value (nil) means a purely
+	// concealed hand and matches the pre-kan-yaku Hand semantics.
+	CalledMelds []CalledMeld
+}
+
+// CalledKind discriminates the five player-visible called/declared meld
+// shapes. Order is fixed (used in tests and in the engine-side mapping).
+type CalledKind uint8
+
+const (
+	CalledPon CalledKind = iota
+	CalledChi
+	CalledMinkan
+	CalledAnkan
+	CalledShouminkan
+)
+
+// CalledMeld is the hand-package view of an engine `game.Meld`. BaseID is
+// the meld's first tile ID (for chi, the lowest); for kans it is the
+// quadded tile's ID.
+type CalledMeld struct {
+	Kind   CalledKind
+	BaseID uint8
 }
 
 func (h Hand) Sorted() []tile.Tile {

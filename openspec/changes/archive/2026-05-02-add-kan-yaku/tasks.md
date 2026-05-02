@@ -1,0 +1,35 @@
+## 0. Data Model — `Hand.CalledMelds` extension and engine wiring
+
+- [x] 0.1 In `internal/riichi/hand/hand_test.go` (create the file if missing), add a failing test `TestHandZeroValueCalledMeldsIsEmpty` that constructs `hand.Hand{Concealed: []tile.Tile{...}}` (no CalledMelds field set) and asserts `len(h.CalledMelds) == 0`. This locks in the back-compat property called out in proposal What Changes.
+- [x] 0.2 In `internal/riichi/hand/hand.go`, add `type CalledKind uint8` with `iota` constants `CalledPon`, `CalledChi`, `CalledMinkan`, `CalledAnkan`, `CalledShouminkan` (in that order). Add `type CalledMeld struct { Kind CalledKind; BaseID uint8 }`. Add a `CalledMelds []CalledMeld` field to `hand.Hand`. Run `go test ./internal/riichi/hand/` and confirm the new back-compat test passes.
+- [x] 0.3 In `internal/game/turn_test.go`, add a failing test `TestContextForWinPopulatesCalledMelds` that uses `Game.SetTestMeld` to plant a `MeldKan{KanKind: KanAnkan, Tiles: [...]}` and a `MeldPon` on a seat, drives `Game` into the tsumo win path with a hand-shaped fixture, and asserts the resulting `hand.Hand` passed to `calc.Analyze` has `CalledMelds` containing one `CalledAnkan` and one `CalledPon` with matching `BaseID` values.
+- [x] 0.4 In `internal/game/turn.go`, add a helper `func (g *Game) calledMeldsFor(s Seat) []hand.CalledMeld` that walks `g.melds[s]` and translates each `game.Meld` into a `hand.CalledMeld` using the mapping from proposal What Changes (`MeldPon → CalledPon`, `MeldChi → CalledChi`, `MeldKan{KanAnkan} → CalledAnkan`, `MeldKan{KanMinkan} → CalledMinkan`, `MeldKan{KanShouminkan} → CalledShouminkan`). The `BaseID` for each entry is `m.Tiles[0].ID`.
+- [x] 0.5 In `internal/game/turn.go`, populate `Hand.CalledMelds = g.calledMeldsFor(seat)` at the three win-construction sites (the `InputDeclareTsumo` branch around the existing `hand.Hand{Concealed:...}` literal, the chankan-ron handler, and the regular ron handler). Run `go test ./internal/game/` and confirm the new turn test plus all previously passing game tests stay green.
+
+## 1. Sankantsu — three-kan detector
+
+- [x] 1.1 In `internal/riichi/yaku/yaku_test.go`, add a failing test `TestDetectSankantsuThreeKansAnyKind` that builds a `hand.Hand` with `CalledMelds = [{CalledAnkan, M1}, {CalledMinkan, M9}, {CalledShouminkan, P5}]` plus a concealed triplet and pair sufficient to form a winning decomposition, then asserts the `yaku.Evaluate` output contains `Match{Name: "Sankantsu", Han: 2}` per Yaku Detection — V1 Set.
+- [x] 1.2 In `internal/riichi/yaku/yaku.go`, add `func detectSankantsu(d hand.Decomposition, h hand.Hand, ctx Context) []Match` that counts entries of `h.CalledMelds` whose `Kind` is one of `CalledAnkan`/`CalledMinkan`/`CalledShouminkan` and returns one `Match{Name: "Sankantsu", Han: 2}` when the count is exactly 3, else nil. Register it in the `Detectors()` slice.
+- [x] 1.3 Run `go test ./internal/riichi/yaku/ -run TestDetectSankantsu` and confirm the test passes.
+
+## 2. Suukantsu — four-kan yakuman detector
+
+- [x] 2.1 In `internal/riichi/yaku/yaku_test.go`, add a failing test `TestDetectSuukantsuFourKansYakuman` that builds a `hand.Hand` with `CalledMelds` containing four kan entries (any mix of kan kinds) plus a pair-only concealed shape, then asserts the result contains `Match{Name: "Suukantsu", IsYakuman: true}` AND `Sankantsu` is NOT present (suukantsu supersedes), per Yaku Detection — V1 Set.
+- [x] 2.2 In `internal/riichi/yaku/yaku.go`, add `func detectSuukantsu(d hand.Decomposition, h hand.Hand, ctx Context) []Match` that returns `Match{Name: "Suukantsu", Han: 13, IsYakuman: true}` when the kan-count of `h.CalledMelds` is exactly 4, else nil. Register it in `Detectors()`.
+- [x] 2.3 In `detectSankantsu` (from task 1.2), early-return nil when the kan count is 4 (suukantsu has already matched, sankantsu must NOT also match per Yaku Detection — V1 Set).
+- [x] 2.4 Run `go test ./internal/riichi/yaku/ -run "TestDetectSuukantsu|TestDetectSankantsu"` and confirm both detectors pass and do not double-count.
+
+## 3. Suuankou — four-concealed-triplet yakuman detector
+
+- [x] 3.1 In `internal/riichi/yaku/yaku_test.go`, add a failing test `TestDetectSuuankouFourAnkansTsumo` that builds a `hand.Hand` with `CalledMelds` containing four `CalledAnkan` entries and a 14-tile concealed bag whose `Decomposition` has four triplets matching the kan bases plus a pair, win by tsumo, then asserts the result contains `Match{Name: "Suuankou", IsYakuman: true}` per Yaku Detection — V1 Set.
+- [x] 3.2 In `internal/riichi/yaku/yaku_test.go`, add a failing test `TestDetectSuuankouRonOnShanponDisables` that builds a fully-concealed (`CalledMelds = nil`) hand of four triplets and a pair, where the winning tile completed the fourth triplet via shanpon-ron, asserts `Suuankou` is NOT present AND `Sanankou` IS present (three triplets remain concealed), per Yaku Detection — V1 Set.
+- [x] 3.3 In `internal/riichi/yaku/yaku_test.go`, add a failing test `TestDetectSuuankouRonOnTankiPreserves` that builds a fully-concealed hand of four concealed triplets where the winning tile completed the pair via tanki-ron, asserts `Match{Name: "Suuankou", IsYakuman: true}` is present, per Yaku Detection — V1 Set.
+- [x] 3.4 In `internal/riichi/yaku/yaku.go`, add `func detectSuuankou(d hand.Decomposition, h hand.Hand, ctx Context) []Match` that: (a) walks `d.Sets()` and for each `MeldTriplet` decides "concealed at agari" using these rules — a triplet at base `B` is open iff `h.CalledMelds` contains an entry with `BaseID == B` AND `Kind ∈ {CalledPon, CalledMinkan, CalledShouminkan}` (`CalledAnkan` keeps the triplet concealed); on top of that, when the win is by ron AND the winning tile's ID equals `B` AND the wait shape is shanpon (i.e. `B != d.Pair().Base`), the triplet is downgraded to open; (b) returns one `Match{Name: "Suuankou", Han: 13, IsYakuman: true}` when the concealed-triplet count is exactly 4, else nil. Register it in `Detectors()`.
+- [x] 3.5 In `internal/riichi/yaku/yaku.go`, extend `Evaluate` with a "Suuankou supersedes Sanankou" cross-cutting rule (mirroring the existing Ryanpeikou-supersedes-Iipeikou and Double-riichi-supersedes-Riichi blocks): when `Suuankou` is present in the matches, drop any `Sanankou` entry before the yakuman-filters step.
+- [x] 3.6 Run `go test ./internal/riichi/yaku/ -run TestDetectSuuankou` and confirm all three new tests pass.
+
+## 4. Verification
+
+- [x] 4.1 Run `go test ./...` from the repository root and confirm all packages pass — especially that no existing yaku test broke from the new `Hand.CalledMelds` field default-empty back-compat or from the suuankou-supersedes-sanankou rule change.
+- [x] 4.2 Run `golangci-lint run ./...` and resolve any lint issues introduced by the new detectors or the `hand.CalledMeld` type.
+- [x] 4.3 Build the binary (`go build -o /tmp/mahjong-cli .`) and confirm a smoke run still launches: `/tmp/mahjong-cli play --seed 42` starts cleanly without panic. Stop the run with `q` after the deal renders.
