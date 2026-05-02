@@ -74,6 +74,13 @@ func Detectors() []Detector {
 		detectSankantsu,
 		detectSuukantsu,
 		detectSuuankou,
+		detectDaisangen,
+		detectDaisuushii,
+		detectShousuushii,
+		detectTsuuiisou,
+		detectChinroutou,
+		detectRyuuiisou,
+		detectChuurenPoutou,
 	}
 }
 
@@ -213,6 +220,26 @@ func Evaluate(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
 		filtered := all[:0]
 		for _, m := range all {
 			if m.Name == "Sanankou" {
+				continue
+			}
+			filtered = append(filtered, m)
+		}
+		all = filtered
+	}
+
+	// Daisuushii supersedes Shousuushii: when both match the same evaluation,
+	// drop the shousuushii line. Same defensive pattern as suuankou-sanankou.
+	hasDaisuushii := false
+	for _, m := range all {
+		if m.Name == "Daisuushii" {
+			hasDaisuushii = true
+			break
+		}
+	}
+	if hasDaisuushii {
+		filtered := all[:0]
+		for _, m := range all {
+			if m.Name == "Shousuushii" {
 				continue
 			}
 			filtered = append(filtered, m)
@@ -779,4 +806,165 @@ func detectChiihou(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
 		return nil
 	}
 	return []Match{{Name: "Chiihou", Han: 13, IsYakuman: true}}
+}
+
+// --- Group B: non-kan yakuman.
+
+func detectDaisangen(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if d.Form != hand.FormStandard {
+		return nil
+	}
+	hasHaku, hasHatsu, hasChun := false, false, false
+	for _, m := range d.Sets() {
+		if m.Kind != hand.MeldTriplet {
+			continue
+		}
+		switch m.Base {
+		case tile.Haku:
+			hasHaku = true
+		case tile.Hatsu:
+			hasHatsu = true
+		case tile.Chun:
+			hasChun = true
+		}
+	}
+	if hasHaku && hasHatsu && hasChun {
+		return []Match{{Name: "Daisangen", Han: 13, IsYakuman: true}}
+	}
+	return nil
+}
+
+func detectDaisuushii(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if d.Form != hand.FormStandard {
+		return nil
+	}
+	winds := [4]bool{}
+	for _, m := range d.Sets() {
+		if m.Kind != hand.MeldTriplet {
+			continue
+		}
+		switch m.Base {
+		case tile.EastWind:
+			winds[0] = true
+		case tile.SouthWind:
+			winds[1] = true
+		case tile.WestWind:
+			winds[2] = true
+		case tile.NorthWind:
+			winds[3] = true
+		}
+	}
+	if winds[0] && winds[1] && winds[2] && winds[3] {
+		return []Match{{Name: "Daisuushii", Han: 13, IsYakuman: true}}
+	}
+	return nil
+}
+
+func detectShousuushii(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if d.Form != hand.FormStandard {
+		return nil
+	}
+	pairBase := d.Pair().Base
+	pairTile := tile.Tile{ID: pairBase}
+	if !pairTile.IsWind() {
+		return nil
+	}
+	windTriplets := 0
+	for _, m := range d.Sets() {
+		if m.Kind != hand.MeldTriplet {
+			continue
+		}
+		if (tile.Tile{ID: m.Base}).IsWind() {
+			windTriplets++
+		}
+	}
+	if windTriplets != 3 {
+		return nil
+	}
+	return []Match{{Name: "Shousuushii", Han: 13, IsYakuman: true}}
+}
+
+func detectTsuuiisou(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if d.Form == hand.FormKokushi {
+		return nil
+	}
+	for _, t := range h.Concealed {
+		if !t.IsHonor() {
+			return nil
+		}
+	}
+	return []Match{{Name: "Tsuuiisou", Han: 13, IsYakuman: true}}
+}
+
+func detectChinroutou(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if d.Form != hand.FormStandard {
+		return nil
+	}
+	for _, t := range h.Concealed {
+		if !t.IsTerminal() || t.IsHonor() {
+			return nil
+		}
+	}
+	return []Match{{Name: "Chinroutou", Han: 13, IsYakuman: true}}
+}
+
+// greenTileIDs is the set of tiles that count for ryuuiisou: 2s/3s/4s/6s/8s
+// plus Hatsu (the green dragon). Using a uint64 bitmask keyed on tile ID
+// keeps the hot-path lookup branch-free.
+var greenTileIDs = func() (mask uint64) {
+	for _, id := range []uint8{tile.S2, tile.S3, tile.S4, tile.S6, tile.S8, tile.Hatsu} {
+		mask |= 1 << id
+	}
+	return mask
+}()
+
+func detectRyuuiisou(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if d.Form == hand.FormKokushi {
+		return nil
+	}
+	for _, t := range h.Concealed {
+		if greenTileIDs&(1<<t.ID) == 0 {
+			return nil
+		}
+	}
+	return []Match{{Name: "Ryuuiisou", Han: 13, IsYakuman: true}}
+}
+
+func detectChuurenPoutou(d hand.Decomposition, h hand.Hand, ctx Context) []Match {
+	if d.Form != hand.FormStandard {
+		return nil
+	}
+	if h.Open || len(h.CalledMelds) > 0 {
+		return nil
+	}
+	if len(h.Concealed) != 14 {
+		return nil
+	}
+	// All tiles must share a single numeric suit. Determine the suit from
+	// the first tile and bail on any honor or off-suit tile.
+	if h.Concealed[0].IsHonor() {
+		return nil
+	}
+	suit := h.Concealed[0].Suit()
+	for _, t := range h.Concealed[1:] {
+		if t.IsHonor() || t.Suit() != suit {
+			return nil
+		}
+	}
+	// Per-rank counts in the suit (ranks 1..9).
+	var counts [10]int
+	for _, t := range h.Concealed {
+		counts[t.Rank()]++
+	}
+	// Subtract one occurrence of the winning tile's rank to get the
+	// remaining 13 tiles. They must form 1-1-1-2-3-4-5-6-7-8-9-9-9.
+	if h.Winning.Suit() != suit {
+		return nil
+	}
+	counts[h.Winning.Rank()]--
+	want := [10]int{0, 3, 1, 1, 1, 1, 1, 1, 1, 3}
+	if counts != want {
+		return nil
+	}
+	return []Match{{Name: "Chuuren poutou", Han: 13, IsYakuman: true}}
 }

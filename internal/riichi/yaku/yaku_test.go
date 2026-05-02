@@ -817,3 +817,101 @@ func TestDetectSuuankouRonOnTankiPreserves(t *testing.T) {
 		t.Errorf("Suuankou must match on tanki-ron with 4 concealed triplets: %+v", matches)
 	}
 }
+
+// --- Group B: non-kan yakuman (daisangen, daisuushii, shousuushii,
+// tsuuiisou, chinroutou, ryuuiisou, chuuren poutou).
+
+func TestDetectDaisangenAllThreeDragons(t *testing.T) {
+	// 5z = Haku, 6z = Hatsu, 7z = Chun. Triplets of all three dragons plus
+	// a 1m2m3m sequence and 4m pair (sequence avoids inadvertently forming
+	// Suuankou via 4 concealed triplets).
+	h := mustHand(t, "5z5z5z6z6z6z7z7z7z1m2m3m4m4m", "4m")
+	matches := flattenMatches(evaluateAll(h, southEastCtx()))
+	if !haveYaku(matches, "Daisangen") {
+		t.Errorf("Daisangen must match for triplets of all three dragons: %+v", matches)
+	}
+	for _, m := range matches {
+		if m.Name == "Daisangen" && !m.IsYakuman {
+			t.Errorf("Daisangen IsYakuman = false, want true")
+		}
+	}
+}
+
+func TestDetectDaisuushiiAllFourWinds(t *testing.T) {
+	// Triplets at all four wind bases (1z..4z) plus 3m pair. Tanki-ron on 3m.
+	h := mustHand(t, "1z1z1z2z2z2z3z3z3z4z4z4z3m3m", "3m")
+	matches := flattenMatches(evaluateAll(h, southEastCtx()))
+	if !haveYaku(matches, "Daisuushii") {
+		t.Errorf("Daisuushii must match for triplets of all four winds: %+v", matches)
+	}
+	if haveYaku(matches, "Shousuushii") {
+		t.Errorf("Shousuushii must NOT match when Daisuushii is present: %+v", matches)
+	}
+}
+
+func TestDetectShousuushiiThreeWindsAndPair(t *testing.T) {
+	// Triplets at East/South/West, pair of North, plus a 3m triplet. Tanki on 3m won't fit; use shanpon on 3m.
+	h := mustHand(t, "1z1z1z2z2z2z3z3z3z4z4z3m3m3m", "3m")
+	matches := flattenMatches(evaluateAll(h, southEastCtx()))
+	if !haveYaku(matches, "Shousuushii") {
+		t.Errorf("Shousuushii must match for three wind triplets + fourth wind pair: %+v", matches)
+	}
+	if haveYaku(matches, "Daisuushii") {
+		t.Errorf("Daisuushii must NOT match (only three wind triplets): %+v", matches)
+	}
+}
+
+func TestDetectTsuuiisouAllHonorsStandard(t *testing.T) {
+	// All honors, FormStandard: triplets of 1z/2z/3z/4z plus 5z pair.
+	h := mustHand(t, "1z1z1z2z2z2z3z3z3z4z4z4z5z5z", "5z")
+	matches := flattenMatches(evaluateAll(h, southEastCtx()))
+	if !haveYaku(matches, "Tsuuiisou") {
+		t.Errorf("Tsuuiisou must match for all-honors standard hand: %+v", matches)
+	}
+}
+
+func TestDetectTsuuiisouAllHonorsChiitoitsu(t *testing.T) {
+	// All honors, FormChiitoitsu: seven distinct honor pairs.
+	h := mustHand(t, "1z1z2z2z3z3z4z4z5z5z6z6z7z7z", "7z")
+	matches := flattenMatches(evaluateAll(h, southEastCtx()))
+	if !haveYaku(matches, "Tsuuiisou") {
+		t.Errorf("Tsuuiisou must match for all-honors chiitoitsu: %+v", matches)
+	}
+}
+
+func TestDetectChinroutouAllTerminalsStandard(t *testing.T) {
+	// Four terminal triplets plus a terminal pair (1s).
+	h := mustHand(t, "1m1m1m9m9m9m1p1p1p9p9p9p1s1s", "1s")
+	matches := flattenMatches(evaluateAll(h, southEastCtx()))
+	if !haveYaku(matches, "Chinroutou") {
+		t.Errorf("Chinroutou must match for all-terminals hand: %+v", matches)
+	}
+}
+
+func TestDetectRyuuiisouAllGreens(t *testing.T) {
+	// All greens: 2s3s4s sequence (×2 = iipeikou shape) + 6s pair + 8s triplet.
+	h := mustHand(t, "2s2s3s3s4s4s2s3s4s6s6s8s8s8s", "8s")
+	matches := flattenMatches(evaluateAll(h, southEastCtx()))
+	if !haveYaku(matches, "Ryuuiisou") {
+		t.Errorf("Ryuuiisou must match for all-greens hand: %+v", matches)
+	}
+}
+
+func TestDetectChuurenPoutouSingleSuit(t *testing.T) {
+	// 1m×3 + 2m..8m + 9m×3 + extra 5m = 14 tiles. Concealed.
+	h := mustHand(t, "1m1m1m2m3m4m5m5m6m7m8m9m9m9m", "5m")
+	matches := flattenMatches(evaluateAll(h, southEastCtx()))
+	if !haveYaku(matches, "Chuuren poutou") {
+		t.Errorf("Chuuren poutou must match for 1112345678999+5m concealed: %+v", matches)
+	}
+}
+
+func TestDetectChuurenPoutouRejectsOpenHand(t *testing.T) {
+	h := mustHand(t, "1m1m1m2m3m4m5m5m6m7m8m9m9m9m", "5m")
+	h.CalledMelds = []hand.CalledMeld{{Kind: hand.CalledPon, BaseID: tile.M1}}
+	h.Open = true
+	matches := flattenMatches(evaluateAll(h, southEastCtx()))
+	if haveYaku(matches, "Chuuren poutou") {
+		t.Errorf("Chuuren poutou must NOT match when hand has called melds: %+v", matches)
+	}
+}
