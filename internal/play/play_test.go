@@ -390,6 +390,51 @@ func TestBotTickIsNotScheduledWhenHumanHasLegalPon(t *testing.T) {
 	}
 }
 
+// TestNoCallWindowOnHumansOwnDiscard verifies the human can't pon/chi/kan/ron
+// their own just-discarded tile. Even when CanPon would return true (the
+// human still has 2 matching tiles after discarding the 3rd), the call
+// window MUST NOT prompt because the discarder cannot claim their own
+// discard. Real-game bug: discarding from a triplet-in-hand opens a
+// nonsensical pon offer.
+func TestNoCallWindowOnHumansOwnDiscard(t *testing.T) {
+	g := game.New(7)
+	// Human keeps 2 P5s in hand after notionally discarding a 3rd P5 —
+	// CanPon would return true on this hand against discard P5.
+	g.SetTestHand(game.SeatSouth, []tile.Tile{
+		{ID: tile.P5},
+		{ID: tile.P5},
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.M4},
+		{ID: tile.M5},
+		{ID: tile.M6},
+		{ID: tile.M7},
+		{ID: tile.M8},
+		{ID: tile.M9},
+		{ID: tile.S1},
+		{ID: tile.S2},
+		{ID: tile.S3},
+	})
+	g.SetTestState(
+		game.StateAwaitingClaims{Discard: tile.Tile{ID: tile.P5}, Discarder: game.SeatSouth},
+	)
+
+	m := NewWithGame(UnicodeRenderer{}, g)
+	if cmd := m.Init(); cmd == nil {
+		t.Errorf(
+			"Init() with human-as-discarder did NOT schedule a bot tick; " +
+				"call window should be skipped (you can't claim your own discard)",
+		)
+	}
+	if cf := m.RenderCallFooter(); cf != "" {
+		t.Errorf(
+			"RenderCallFooter() returned %q on human's own discard; "+
+				"expected empty (no claim prompt). View:\n%s",
+			cf, cf,
+		)
+	}
+}
+
 // TestBotTickIsScheduledWhenHumanHasNoLegalClaim confirms the auto-tick
 // still fires for claim states the human can't act on, so bot auto-pass
 // advances without manual input.

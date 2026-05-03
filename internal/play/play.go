@@ -305,6 +305,12 @@ func (m Model) isBotTurn() bool {
 		// pon or chi to consider. Otherwise auto-tick: bots auto-pass in v1
 		// (real bot pon/chi/ron logic ships in add-smart-ai), and there's
 		// nothing for the human to decide.
+		//
+		// You cannot claim your own discard — when the human is the
+		// discarder, no claim prompt should fire.
+		if s.Discarder == HumanSeat {
+			return true
+		}
 		humanHand := m.game.Hand(HumanSeat)
 		if game.CanPon(humanHand, s.Discard) {
 			return false
@@ -779,6 +785,11 @@ func (m Model) RenderCallFooter() string {
 	}
 	cs, ok := m.game.State().(game.StateAwaitingClaims)
 	if !ok {
+		return ""
+	}
+	// You cannot claim your own discard — suppress the call-window prompt
+	// entirely when the human is the discarder.
+	if cs.Discarder == HumanSeat {
 		return ""
 	}
 	humanHand := m.game.Hand(HumanSeat)
