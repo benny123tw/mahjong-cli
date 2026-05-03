@@ -863,13 +863,19 @@ func (m Model) scoreSuffix(s game.Seat) string {
 	return fmt.Sprintf(" · %d", m.match.Scores()[s])
 }
 
-// renderTransitionAck draws the end-of-hand summary panel: outcome line,
-// per-seat point deltas, post-payout totals, and (on renchan) the new
-// honba count. Returns to the play layout when any keypress is received.
+// renderTransitionAck draws the end-of-hand reveal panel. For supported
+// outcome variants (ron, tsumo, ryuukyoku) it delegates to the enriched
+// `renderEndPanel` (four-row reveal + yaku/han/fu/deltas for wins;
+// four-row reveal + tenpai/noten labels + deltas for ryuukyoku). For
+// unsupported variants it falls back to the minimal outcome-line +
+// deltas + renchan-or-next-hand summary.
 func (m Model) renderTransitionAck() string {
 	tr := m.pendingTransition
 	if tr == nil {
 		return ""
+	}
+	if rich := m.renderEndPanel(); rich != "" {
+		return rich
 	}
 	header := "Hand complete"
 	if m.game != nil {
@@ -888,7 +894,7 @@ func (m Model) renderTransitionAck() string {
 	} else if tr.MatchOutcome == nil {
 		rows = append(rows, labelStyle.Render(fmt.Sprintf("Next hand: index %d", tr.NewHandIndex)))
 	}
-	rows = append(rows, "", liveKeyStyle.Render("[any key] Continue"))
+	rows = append(rows, "", liveKeyStyle.Render(endPanelFooter))
 	return strings.Join(rows, "\n")
 }
 
@@ -1171,7 +1177,7 @@ func (m Model) renderHand() string {
 		cells = append(cells, tileBlock)
 	}
 	concealed := lipgloss.JoinHorizontal(lipgloss.Top, cells...)
-	melds := m.renderOpenMelds()
+	melds := m.renderOpenMeldsForSeat(HumanSeat)
 	if melds == "" {
 		return concealed
 	}
@@ -1185,18 +1191,21 @@ func (m Model) renderHand() string {
 	return combined
 }
 
-// renderOpenMelds renders the human's called melds (pon, chi, ankan, minkan,
-// shouminkan) as a horizontally-joined block. The seat-source marker
-// ([E]/[S]/[W]/[N]) is attached immediately to the LEFT of the called tile
-// — the tile most recently grabbed for that meld — so the player can see
-// which physical tile came from another seat. Ankan has no called tile, so
-// [A] is rendered as a meld-level prefix. Returns "" when the human has no
-// open melds — preserving byte-identical pre-change rendering.
-func (m Model) renderOpenMelds() string {
+// renderOpenMeldsForSeat renders `seat`'s called melds (pon, chi, ankan,
+// minkan, shouminkan) as a horizontally-joined block. The seat-source
+// marker ([E]/[S]/[W]/[N]) is attached immediately to the LEFT of the
+// called tile — the tile most recently grabbed for that meld — so the
+// reader can see which physical tile came from another seat. Ankan has
+// no called tile, so [A] is rendered as a meld-level prefix. Returns ""
+// when the seat has no open melds.
+//
+// Generalized from the original `renderOpenMelds()` (HumanSeat-only) to
+// support the end-of-hand reveal panel where every seat's melds render.
+func (m Model) renderOpenMeldsForSeat(seat game.Seat) string {
 	if m.game == nil {
 		return ""
 	}
-	melds := m.game.Melds(HumanSeat)
+	melds := m.game.Melds(seat)
 	if len(melds) == 0 {
 		return ""
 	}

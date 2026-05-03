@@ -12,6 +12,7 @@ import (
 	"github.com/benny123tw/mahjong-cli/internal/riichi/hand"
 	"github.com/benny123tw/mahjong-cli/internal/riichi/score"
 	"github.com/benny123tw/mahjong-cli/internal/riichi/tile"
+	"github.com/benny123tw/mahjong-cli/internal/riichi/yaku"
 )
 
 func TestModelReflectsGameHandAndDiscards(t *testing.T) {
@@ -891,8 +892,8 @@ func TestEndOfHandAckPanelOnRoundOver(t *testing.T) {
 		t.Fatalf("pendingTransition is nil after RoundOver tick; expected ack to fire")
 	}
 	view := mu.View().Content
-	if !strings.Contains(view, "ron") {
-		t.Errorf("ack panel view does not mention 'ron'. View:\n%s", view)
+	if !strings.Contains(view, "RON") {
+		t.Errorf("ack panel view does not mention RON. View:\n%s", view)
 	}
 	if !strings.Contains(view, "South") || !strings.Contains(view, "East") {
 		t.Errorf("ack panel view missing seat labels. View:\n%s", view)
@@ -1409,7 +1410,7 @@ func TestRenderOpenMeldsMarkerPointsAtCalledTile(t *testing.T) {
 	})
 
 	m := NewWithGame(UnicodeRenderer{}, g)
-	out := m.renderOpenMelds()
+	out := m.renderOpenMeldsForSeat(game.SeatSouth)
 
 	r := UnicodeRenderer{}
 	m2Glyph := strings.Join(r.Tile(tile.Tile{ID: tile.M2}), "\n")
@@ -1461,7 +1462,7 @@ func TestRenderOpenMeldsAnkanKeepsMarkerAsPrefix(t *testing.T) {
 	})
 
 	m := NewWithGame(UnicodeRenderer{}, g)
-	out := m.renderOpenMelds()
+	out := m.renderOpenMeldsForSeat(game.SeatSouth)
 
 	r := UnicodeRenderer{}
 	eastGlyph := strings.Join(r.Tile(tile.Tile{ID: tile.EastWind}), "\n")
@@ -1476,6 +1477,548 @@ func TestRenderOpenMeldsAnkanKeepsMarkerAsPrefix(t *testing.T) {
 			"[A] should precede the first ankan tile (no called tile to point at). "+
 				"Got [A]=%d, first East=%d. Output:\n%s",
 			idxMarker, idxFirstEast, out,
+		)
+	}
+}
+
+// TestEndPanelRonRevealsHandsAndYakuBreakdown verifies that on a ron
+// outcome the end-of-hand panel reveals all four seats' hands plus the
+// yaku, totals, and deltas — per the End-of-Hand Acknowledgement
+// requirement (the enriched reveal panel).
+func TestEndPanelRonRevealsHandsAndYakuBreakdown(t *testing.T) {
+	m := game.NewMatch(7)
+	cur := m.CurrentGame()
+
+	// Plant a known concealed hand on each seat; South contains 5p (winning tile).
+	cur.SetTestHand(game.SeatEast, []tile.Tile{
+		{ID: tile.M1},
+		{ID: tile.M1},
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.P2},
+		{ID: tile.P3},
+		{ID: tile.P4},
+		{ID: tile.S1},
+		{ID: tile.S2},
+		{ID: tile.S3},
+		{ID: tile.S5},
+		{ID: tile.S6},
+		{ID: tile.S7},
+	})
+	cur.SetTestHand(game.SeatSouth, []tile.Tile{
+		{ID: tile.M1},
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.P5},
+		{ID: tile.P5},
+		{ID: tile.P5},
+		{ID: tile.P6},
+		{ID: tile.P7},
+		{ID: tile.P8},
+		{ID: tile.S2},
+		{ID: tile.S3},
+		{ID: tile.S4},
+		{ID: tile.M9},
+		{ID: tile.M9},
+	})
+	cur.SetTestHand(game.SeatWest, []tile.Tile{
+		{ID: tile.M4},
+		{ID: tile.M5},
+		{ID: tile.M6},
+		{ID: tile.P1},
+		{ID: tile.P2},
+		{ID: tile.P3},
+		{ID: tile.S4},
+		{ID: tile.S5},
+		{ID: tile.S6},
+		{ID: tile.Haku},
+		{ID: tile.Haku},
+		{ID: tile.Haku},
+		{ID: tile.Chun},
+	})
+	cur.SetTestHand(game.SeatNorth, []tile.Tile{
+		{ID: tile.M7},
+		{ID: tile.M8},
+		{ID: tile.M9},
+		{ID: tile.P7},
+		{ID: tile.P8},
+		{ID: tile.P9},
+		{ID: tile.S7},
+		{ID: tile.S8},
+		{ID: tile.S9},
+		{ID: tile.Hatsu},
+		{ID: tile.Hatsu},
+		{ID: tile.NorthWind},
+		{ID: tile.NorthWind},
+	})
+
+	cur.SetTestState(game.StateRoundOver{Outcome: game.OutcomeRon{
+		Winner: game.SeatSouth,
+		Loser:  game.SeatEast,
+		Tile:   tile.Tile{ID: tile.P5},
+		Result: &calc.Result{
+			YakuMatches: []yaku.Match{
+				{Name: "Riichi", Han: 1},
+				{Name: "Pinfu", Han: 1},
+				{Name: "Tanyao", Han: 1},
+			},
+			Han:   3,
+			Fu:    30,
+			Award: score.Award{Han: 3, Fu: 30, Base: 480, Total: 3900},
+		},
+	}})
+
+	model := NewWithMatch(UnicodeRenderer{}, m)
+	updated, _ := model.Update(BotTickMsg{})
+	mu := updated.(Model)
+	view := mu.View().Content
+
+	// Header: kind, winner, discarder.
+	if !strings.Contains(view, "RON") {
+		t.Errorf("end panel missing RON header. View:\n%s", view)
+	}
+	if !strings.Contains(view, "South") || !strings.Contains(view, "East") {
+		t.Errorf("end panel missing winner/discarder seat names. View:\n%s", view)
+	}
+
+	// Yaku breakdown.
+	if !strings.Contains(view, "Riichi 1") ||
+		!strings.Contains(view, "Pinfu 1") ||
+		!strings.Contains(view, "Tanyao 1") {
+		t.Errorf("end panel missing per-yaku name+han entries. View:\n%s", view)
+	}
+
+	// Totals line.
+	if !strings.Contains(view, "Han 3") ||
+		!strings.Contains(view, "Fu 30") ||
+		!strings.Contains(view, "Base 480") {
+		t.Errorf("end panel missing Han/Fu/Base totals. View:\n%s", view)
+	}
+
+	// Deltas (East loses 3900, South gains 3900).
+	if !strings.Contains(view, "-3900") || !strings.Contains(view, "+3900") {
+		t.Errorf("end panel missing per-seat deltas. View:\n%s", view)
+	}
+
+	// Footer.
+	if !strings.Contains(view, "[Any key — Continue]") {
+		t.Errorf("end panel missing footer terminator. View:\n%s", view)
+	}
+
+	// Every seat's concealed hand should be face-up. Probe one tile per seat
+	// (using glyph from the test renderer).
+	r := UnicodeRenderer{}
+	probes := []struct {
+		seat string
+		tile tile.Tile
+	}{
+		{"East", tile.Tile{ID: tile.S7}},
+		{"West", tile.Tile{ID: tile.Chun}},
+		{"North", tile.Tile{ID: tile.NorthWind}},
+	}
+	for _, p := range probes {
+		glyph := strings.Join(r.Tile(p.tile), "\n")
+		if !strings.Contains(view, glyph) {
+			t.Errorf("end panel does not reveal %s's hand (missing glyph %q). View:\n%s",
+				p.seat, glyph, view)
+		}
+	}
+}
+
+// TestEndPanelRonWinningTileIsHighlighted asserts the winning tile in
+// the winner's hand row is bold (ANSI \x1b[1m) and that the winner's row
+// begins with "[W] ". Per the End-of-Hand Acknowledgement requirement.
+func TestEndPanelRonWinningTileIsHighlighted(t *testing.T) {
+	m := game.NewMatch(7)
+	cur := m.CurrentGame()
+	// Plant non-P5 hands on East/West/North so the first P5 glyph in the
+	// rendered view is the winner's (highlighted) tile in South's row.
+	mTiles := []tile.Tile{
+		{ID: tile.M1},
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.M4},
+		{ID: tile.M5},
+		{ID: tile.M6},
+		{ID: tile.M7},
+		{ID: tile.M8},
+		{ID: tile.M9},
+		{ID: tile.S1},
+		{ID: tile.S2},
+		{ID: tile.S3},
+		{ID: tile.S4},
+	}
+	cur.SetTestHand(game.SeatEast, mTiles)
+	cur.SetTestHand(game.SeatSouth, []tile.Tile{
+		{ID: tile.M1},
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.P5},
+		{ID: tile.P5},
+		{ID: tile.P5},
+		{ID: tile.P6},
+		{ID: tile.P7},
+		{ID: tile.P8},
+		{ID: tile.S2},
+		{ID: tile.S3},
+		{ID: tile.S4},
+		{ID: tile.M9},
+		{ID: tile.M9},
+	})
+	cur.SetTestHand(game.SeatWest, []tile.Tile{
+		{ID: tile.S5},
+		{ID: tile.S6},
+		{ID: tile.S7},
+		{ID: tile.S8},
+		{ID: tile.S9},
+		{ID: tile.Haku},
+		{ID: tile.Hatsu},
+		{ID: tile.Chun},
+		{ID: tile.EastWind},
+		{ID: tile.SouthWind},
+		{ID: tile.WestWind},
+		{ID: tile.NorthWind},
+		{ID: tile.M1},
+	})
+	cur.SetTestHand(game.SeatNorth, mTiles)
+	cur.SetTestState(game.StateRoundOver{Outcome: game.OutcomeRon{
+		Winner: game.SeatSouth,
+		Loser:  game.SeatEast,
+		Tile:   tile.Tile{ID: tile.P5},
+		Result: &calc.Result{
+			YakuMatches: []yaku.Match{{Name: "Riichi", Han: 1}},
+			Han:         1,
+			Fu:          30,
+			Award:       score.Award{Han: 1, Fu: 30, Base: 480, Total: 1500},
+		},
+	}})
+
+	model := NewWithMatch(UnicodeRenderer{}, m)
+	updated, _ := model.Update(BotTickMsg{})
+	mu := updated.(Model)
+	view := mu.View().Content
+
+	// focusedTileStyle uses Bold(true) + Foreground(212) which lipgloss
+	// emits as the SGR sequence "\x1b[1;38;5;212m" — bold + 256-color fg.
+	// The presence of this exact prefix immediately before the winning
+	// glyph in the winner's row is the highlight signal.
+	const focusedSGR = "\x1b[1;38;5;212m"
+	r := UnicodeRenderer{}
+	winGlyph := strings.Join(r.Tile(tile.Tile{ID: tile.P5}), "\n")
+
+	southIdx := strings.Index(view, "South")
+	if southIdx < 0 {
+		t.Fatalf("end panel does not mention South. View:\n%s", view)
+	}
+	tail := view[southIdx:]
+	beforeWin, _, found := strings.Cut(tail, winGlyph)
+	if !found {
+		t.Fatalf("winning glyph not present in South's row. View:\n%s", view)
+	}
+	if !strings.Contains(beforeWin, focusedSGR) {
+		t.Errorf(
+			"no focused-tile SGR before the winning %s glyph; expected highlight. "+
+				"beforeWin=%q",
+			winGlyph, beforeWin,
+		)
+	}
+
+	// Winner row begins with "[W] " (after stripping leading style escapes).
+	if !strings.Contains(view, "[W] ") {
+		t.Errorf("winner-row prefix [W] missing. View:\n%s", view)
+	}
+}
+
+// TestEndPanelFooterReplacesActionFooter asserts the panel-active footer
+// is "[Any key — Continue]" and that the normal action-footer keys
+// ("Move", "Discard", "Riichi", etc.) are absent. Per the End-of-Hand
+// Acknowledgement requirement.
+func TestEndPanelFooterReplacesActionFooter(t *testing.T) {
+	m := game.NewMatch(7)
+	cur := m.CurrentGame()
+	cur.SetTestState(game.StateRoundOver{Outcome: game.OutcomeRyuukyoku{
+		TenpaiPlayers: []game.Seat{game.SeatSouth},
+	}})
+	model := NewWithMatch(UnicodeRenderer{}, m)
+	updated, _ := model.Update(BotTickMsg{})
+	mu := updated.(Model)
+	view := mu.View().Content
+
+	if !strings.Contains(view, "[Any key — Continue]") {
+		t.Errorf("end panel missing terminator footer. View:\n%s", view)
+	}
+	for _, banned := range []string{"Move", "Discard", "Riichi", "Tsumo"} {
+		if strings.Contains(view, banned) {
+			t.Errorf(
+				"end panel leaks action-footer label %q "+
+					"(action footer should be replaced). View:\n%s",
+				banned, view,
+			)
+		}
+	}
+}
+
+// TestEndPanelRyuukyokuLabelsAndPayments parameterized over all 5 cases
+// from the ryuukyoku-payment example table (0/4, 1/3, 2/2, 3/1, 4/0).
+// Per the End-of-Hand Acknowledgement requirement.
+func TestEndPanelRyuukyokuLabelsAndPayments(t *testing.T) {
+	cases := []struct {
+		name         string
+		tenpai       []game.Seat
+		wantDeltas   string
+		expectations [4]string
+	}{
+		{
+			name:   "0 tenpai (0/4)",
+			tenpai: []game.Seat{},
+			// Per spec: 0 tenpai → all deltas 0.
+			expectations: [4]string{"noten", "noten", "noten", "noten"},
+		},
+		{
+			name:         "1 tenpai (1/3) — South",
+			tenpai:       []game.Seat{game.SeatSouth},
+			wantDeltas:   "+3000",
+			expectations: [4]string{"noten", "tenpai", "noten", "noten"},
+		},
+		{
+			name:         "2 tenpai (2/2) — South+West",
+			tenpai:       []game.Seat{game.SeatSouth, game.SeatWest},
+			wantDeltas:   "+1500",
+			expectations: [4]string{"noten", "tenpai", "tenpai", "noten"},
+		},
+		{
+			name:         "3 tenpai (3/1) — North noten",
+			tenpai:       []game.Seat{game.SeatEast, game.SeatSouth, game.SeatWest},
+			wantDeltas:   "-3000",
+			expectations: [4]string{"tenpai", "tenpai", "tenpai", "noten"},
+		},
+		{
+			name:   "4 tenpai (4/0)",
+			tenpai: []game.Seat{game.SeatEast, game.SeatSouth, game.SeatWest, game.SeatNorth},
+			// Per spec: 4 tenpai → all deltas 0.
+			expectations: [4]string{"tenpai", "tenpai", "tenpai", "tenpai"},
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := game.NewMatch(7)
+			cur := m.CurrentGame()
+			cur.SetTestState(game.StateRoundOver{Outcome: game.OutcomeRyuukyoku{
+				TenpaiPlayers: c.tenpai,
+			}})
+
+			model := NewWithMatch(UnicodeRenderer{}, m)
+			updated, _ := model.Update(BotTickMsg{})
+			mu := updated.(Model)
+			view := mu.View().Content
+
+			if !strings.Contains(view, "RYUUKYOKU") {
+				t.Errorf("missing RYUUKYOKU header. View:\n%s", view)
+			}
+			// Inline tenpai/noten label per seat row.
+			seats := []string{"East", "South", "West", "North"}
+			for i, seat := range seats {
+				wantTag := c.expectations[i]
+				seatIdx := strings.Index(view, seat)
+				if seatIdx < 0 {
+					t.Errorf("seat %s not in view. View:\n%s", seat, view)
+					continue
+				}
+				// The row's tag appears after the seat label and before the
+				// next seat label or the trailing deltas line.
+				rowEnd := len(view)
+				if i+1 < len(seats) {
+					if nextIdx := strings.Index(view[seatIdx:], seats[i+1]); nextIdx >= 0 {
+						rowEnd = seatIdx + nextIdx
+					}
+				} else if dIdx := strings.Index(view[seatIdx:], "(→"); dIdx >= 0 {
+					// Deltas row contains "(→<total>)" — stop before it.
+					rowEnd = seatIdx + dIdx
+				}
+				rowText := view[seatIdx:rowEnd]
+				if !strings.Contains(rowText, wantTag) {
+					t.Errorf(
+						"seat %s row missing tag %q. row=%q",
+						seat, wantTag, rowText,
+					)
+				}
+			}
+			// Deltas row signature for non-zero cases.
+			if c.wantDeltas != "" && !strings.Contains(view, c.wantDeltas) {
+				t.Errorf(
+					"missing expected deltas substring %q. View:\n%s",
+					c.wantDeltas, view,
+				)
+			}
+			if !strings.Contains(view, "[Any key — Continue]") {
+				t.Errorf("missing footer terminator. View:\n%s", view)
+			}
+		})
+	}
+}
+
+// TestEndPanelTsumoRevealsHandsAndYakuBreakdown asserts the tsumo
+// outcome surfaces the same reveal + yaku/han/fu/deltas content as ron,
+// with a TSUMO header (no "from <seat>" clause). Per the End-of-Hand
+// Acknowledgement requirement.
+func TestEndPanelTsumoRevealsHandsAndYakuBreakdown(t *testing.T) {
+	m := game.NewMatch(7)
+	cur := m.CurrentGame()
+	cur.SetTestHand(game.SeatSouth, []tile.Tile{
+		{ID: tile.M1},
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.P5},
+		{ID: tile.P5},
+		{ID: tile.P5},
+		{ID: tile.P6},
+		{ID: tile.P7},
+		{ID: tile.P8},
+		{ID: tile.S2},
+		{ID: tile.S3},
+		{ID: tile.S4},
+		{ID: tile.M9},
+		{ID: tile.M9},
+	})
+	cur.SetTestState(game.StateRoundOver{Outcome: game.OutcomeTsumo{
+		Winner: game.SeatSouth,
+		Tile:   tile.Tile{ID: tile.P5},
+		Result: &calc.Result{
+			YakuMatches: []yaku.Match{
+				{Name: "Riichi", Han: 1},
+				{Name: "Pinfu", Han: 1},
+				{Name: "Tanyao", Han: 1},
+			},
+			Han:   3,
+			Fu:    30,
+			Award: score.Award{Han: 3, Fu: 30, Base: 480, Total: 4000},
+		},
+	}})
+
+	model := NewWithMatch(UnicodeRenderer{}, m)
+	updated, _ := model.Update(BotTickMsg{})
+	mu := updated.(Model)
+	view := mu.View().Content
+
+	if !strings.Contains(view, "TSUMO") {
+		t.Errorf("end panel missing TSUMO header. View:\n%s", view)
+	}
+	// Tsumo header SHALL NOT include a "from <seat>" clause.
+	if strings.Contains(view, "TSUMO — South wins from") {
+		t.Errorf("TSUMO header should not contain 'from <seat>'. View:\n%s", view)
+	}
+	if !strings.Contains(view, "South") {
+		t.Errorf("end panel missing winner seat name. View:\n%s", view)
+	}
+	if !strings.Contains(view, "Riichi 1") || !strings.Contains(view, "Pinfu 1") {
+		t.Errorf("end panel missing yaku entries. View:\n%s", view)
+	}
+	if !strings.Contains(view, "Han 3") ||
+		!strings.Contains(view, "Fu 30") ||
+		!strings.Contains(view, "Base 480") {
+		t.Errorf("end panel missing totals line. View:\n%s", view)
+	}
+	if !strings.Contains(view, "[Any key — Continue]") {
+		t.Errorf("end panel missing footer terminator. View:\n%s", view)
+	}
+}
+
+// TestEndPanelRonChankanLabelsHeader verifies that when the winning
+// hand's yaku list contains "Chankan" (the engine's signal for a
+// chankan-ron), the panel header reads "CHANKAN RON" instead of "RON".
+// Per the End-of-Hand Acknowledgement requirement.
+func TestEndPanelRonChankanLabelsHeader(t *testing.T) {
+	m := game.NewMatch(7)
+	cur := m.CurrentGame()
+	cur.SetTestState(game.StateRoundOver{Outcome: game.OutcomeRon{
+		Winner: game.SeatSouth,
+		Loser:  game.SeatEast,
+		Tile:   tile.Tile{ID: tile.M5},
+		Result: &calc.Result{
+			YakuMatches: []yaku.Match{
+				{Name: "Riichi", Han: 1},
+				{Name: "Chankan", Han: 1},
+			},
+			Han:   2,
+			Fu:    30,
+			Award: score.Award{Han: 2, Fu: 30, Base: 480, Total: 2000},
+		},
+	}})
+
+	model := NewWithMatch(UnicodeRenderer{}, m)
+	updated, _ := model.Update(BotTickMsg{})
+	mu := updated.(Model)
+	view := mu.View().Content
+
+	if !strings.Contains(view, "CHANKAN RON") {
+		t.Errorf(
+			"end panel should label chankan-ron in the header. View:\n%s",
+			view,
+		)
+	}
+	// And NOT plain RON header alongside (the kind word is exclusive).
+	// We check that "RON" appears only as part of "CHANKAN RON" — i.e.,
+	// the only occurrence is preceded by "CHANKAN ".
+	idx := strings.Index(view, "RON")
+	if idx > 0 && !strings.HasSuffix(view[:idx], "CHANKAN ") {
+		t.Errorf("plain RON appears outside CHANKAN RON. View:\n%s", view)
+	}
+}
+
+func TestRenderOpenMeldsForSeatRendersCorrectSeatMelds(t *testing.T) {
+	g := game.New(7)
+	// Plant a pon of M1 from South onto SeatEast.
+	g.SetTestMeld(game.SeatEast, game.Meld{
+		Kind:  game.MeldPon,
+		Tiles: []tile.Tile{{ID: tile.M1}, {ID: tile.M1}, {ID: tile.M1}},
+		From:  game.SeatSouth,
+	})
+	// Plant an ankan of EastWind onto SeatNorth.
+	g.SetTestMeld(game.SeatNorth, game.Meld{
+		Kind:    game.MeldKan,
+		KanKind: game.KanAnkan,
+		Tiles: []tile.Tile{
+			{ID: tile.EastWind},
+			{ID: tile.EastWind},
+			{ID: tile.EastWind},
+			{ID: tile.EastWind},
+		},
+	})
+
+	m := NewWithGame(UnicodeRenderer{}, g)
+
+	r := UnicodeRenderer{}
+	m1Glyph := strings.Join(r.Tile(tile.Tile{ID: tile.M1}), "\n")
+	eastGlyph := strings.Join(r.Tile(tile.Tile{ID: tile.EastWind}), "\n")
+
+	eastOut := m.renderOpenMeldsForSeat(game.SeatEast)
+	if !strings.Contains(eastOut, m1Glyph) {
+		t.Errorf("renderOpenMeldsForSeat(SeatEast) missing 1m glyph. Output:\n%s", eastOut)
+	}
+	if !strings.Contains(eastOut, "[S]") {
+		t.Errorf(
+			"renderOpenMeldsForSeat(SeatEast) missing [S] marker (called from South). Output:\n%s",
+			eastOut,
+		)
+	}
+
+	northOut := m.renderOpenMeldsForSeat(game.SeatNorth)
+	if !strings.Contains(northOut, eastGlyph) {
+		t.Errorf("renderOpenMeldsForSeat(SeatNorth) missing EastWind glyph. Output:\n%s", northOut)
+	}
+	if !strings.Contains(northOut, "[A]") {
+		t.Errorf(
+			"renderOpenMeldsForSeat(SeatNorth) missing [A] marker for ankan. Output:\n%s",
+			northOut,
+		)
+	}
+
+	// Cross-seat isolation: SeatEast's output must NOT contain SeatNorth's tiles.
+	if strings.Contains(eastOut, eastGlyph) {
+		t.Errorf(
+			"renderOpenMeldsForSeat(SeatEast) leaked SeatNorth's EastWind tiles. Output:\n%s",
+			eastOut,
 		)
 	}
 }
