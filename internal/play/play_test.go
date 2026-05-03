@@ -2011,6 +2011,204 @@ func TestEndPanelRonChankanLabelsHeader(t *testing.T) {
 	}
 }
 
+// TestOpponentZonesUnchangedWithZeroMelds asserts that when no opponent
+// has any open melds, the per-zone rendering is structurally identical
+// to the pre-change output: label, optional pond, no extra blank line
+// where the meld block would have gone. Per the Play Screen Layout
+// zero-meld scenario.
+func TestOpponentZonesUnchangedWithZeroMelds(t *testing.T) {
+	m := game.NewMatch(7)
+	model := NewWithMatch(UnicodeRenderer{}, m)
+
+	// With zero melds on each opponent, the zone output must NOT contain
+	// a doubled-newline pattern between label and pond/back-row that
+	// would only appear if the meld renderer added an empty line.
+	zones := []struct {
+		name string
+		out  string
+	}{
+		{"Kamicha", model.renderKamichaColumn()},
+		{"Shimocha", model.renderShimochaColumn()},
+		{"Toimen", model.renderToimenRow()},
+	}
+	for _, z := range zones {
+		if strings.Contains(z.out, "\n\n") {
+			t.Errorf(
+				"%s zone with zero melds contains \\n\\n; suggests meld-block "+
+					"insertion is leaking an empty line. Output:\n%s",
+				z.name, z.out,
+			)
+		}
+	}
+}
+
+// TestOpponentZonesIncludeMelds verifies that each opponent's zone in
+// the four-quadrant layout shows that seat's open melds between the
+// seat label and the seat's other content (back-row for Toimen,
+// discard pond for Kamicha and Shimocha). Per the Play Screen Layout
+// requirement (opponent-zone rendering).
+func TestOpponentZonesIncludeMelds(t *testing.T) {
+	cases := []struct {
+		name       string
+		seat       game.Seat
+		seatLabel  string
+		meldTileID uint8
+		fromSeat   game.Seat
+		fromMarker string
+	}{
+		{
+			"Kamicha · East", game.SeatEast, "Kamicha · East",
+			tile.P5, game.SeatSouth, "[S]",
+		},
+		{
+			"Toimen — North", game.SeatNorth, "Toimen — North",
+			tile.M1, game.SeatWest, "[W]",
+		},
+		{
+			"Shimocha · West", game.SeatWest, "Shimocha · West",
+			tile.P9, game.SeatEast, "[E]",
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := game.NewMatch(7)
+			cur := m.CurrentGame()
+			cur.SetTestMeld(c.seat, game.Meld{
+				Kind: game.MeldPon,
+				Tiles: []tile.Tile{
+					{ID: c.meldTileID},
+					{ID: c.meldTileID},
+					{ID: c.meldTileID},
+				},
+				From: c.fromSeat,
+			})
+			model := NewWithMatch(UnicodeRenderer{}, m)
+			view := model.View().Content
+
+			r := UnicodeRenderer{}
+			meldGlyph := strings.Join(r.Tile(tile.Tile{ID: c.meldTileID}), "\n")
+
+			labelIdx := strings.Index(view, c.seatLabel)
+			if labelIdx < 0 {
+				t.Fatalf("seat label %q missing from view. View:\n%s", c.seatLabel, view)
+			}
+			meldIdx := strings.Index(view[labelIdx:], meldGlyph)
+			if meldIdx < 0 {
+				t.Fatalf("meld glyph not found AFTER seat label. View:\n%s", view)
+			}
+			markerIdx := strings.Index(view[labelIdx:], c.fromMarker)
+			if markerIdx < 0 {
+				t.Fatalf("seat-source marker %q missing AFTER label. View:\n%s",
+					c.fromMarker, view)
+			}
+		})
+	}
+}
+
+// TestRenderOpponentMeldsZeroMeldCase asserts that a seat with no open
+// melds produces an empty string, so the four-quadrant layout stays
+// byte-identical to the pre-change rendering. Per the Play Screen Layout
+// requirement (zero-meld scenario).
+func TestRenderOpponentMeldsZeroMeldCase(t *testing.T) {
+	g := game.New(7)
+	m := NewWithGame(UnicodeRenderer{}, g)
+
+	for _, seat := range []game.Seat{game.SeatEast, game.SeatNorth, game.SeatWest} {
+		if got := m.renderOpponentMelds(seat, kamichaZoneWidth); got != "" {
+			t.Errorf("renderOpponentMelds(%v, %d) with no melds = %q, want empty",
+				seat, kamichaZoneWidth, got)
+		}
+	}
+}
+
+// TestRenderOpponentMeldsFitsOnOneLine asserts that a seat with one pon
+// returns a single-line block whose width fits within the zone budget
+// and contains the expected glyph + seat-source marker. Per the
+// one-line scenario in the Play Screen Layout requirement.
+func TestRenderOpponentMeldsFitsOnOneLine(t *testing.T) {
+	g := game.New(7)
+	g.SetTestMeld(game.SeatEast, game.Meld{
+		Kind:  game.MeldPon,
+		Tiles: []tile.Tile{{ID: tile.P5}, {ID: tile.P5}, {ID: tile.P5}},
+		From:  game.SeatSouth,
+	})
+	m := NewWithGame(UnicodeRenderer{}, g)
+
+	out := m.renderOpponentMelds(game.SeatEast, kamichaZoneWidth)
+	if strings.Contains(out, "\n") {
+		t.Errorf("expected single-line output for 1 pon; got multi-line:\n%s", out)
+	}
+	if w := lipgloss.Width(out); w > kamichaZoneWidth {
+		t.Errorf("rendered width %d exceeds zone width %d. Output: %q",
+			w, kamichaZoneWidth, out)
+	}
+	r := UnicodeRenderer{}
+	p5Glyph := strings.Join(r.Tile(tile.Tile{ID: tile.P5}), "\n")
+	if !strings.Contains(out, p5Glyph) {
+		t.Errorf("output missing 5p glyph. Output: %q", out)
+	}
+	if !strings.Contains(out, "[S]") {
+		t.Errorf("output missing [S] marker. Output: %q", out)
+	}
+}
+
+// TestRenderOpponentMeldsWrapsWhenTooWide asserts that two melds whose
+// combined width exceeds the zone budget wrap to two lines (one meld
+// per line) within the zone budget. Per the wrap scenario.
+func TestRenderOpponentMeldsWrapsWhenTooWide(t *testing.T) {
+	g := game.New(7)
+	g.SetTestMeld(game.SeatEast, game.Meld{
+		Kind:  game.MeldPon,
+		Tiles: []tile.Tile{{ID: tile.P5}, {ID: tile.P5}, {ID: tile.P5}},
+		From:  game.SeatSouth,
+	})
+	g.SetTestMeld(game.SeatEast, game.Meld{
+		Kind:  game.MeldPon,
+		Tiles: []tile.Tile{{ID: tile.M1}, {ID: tile.M1}, {ID: tile.M1}},
+		From:  game.SeatWest,
+	})
+	m := NewWithGame(UnicodeRenderer{}, g)
+
+	out := m.renderOpponentMelds(game.SeatEast, kamichaZoneWidth)
+	lines := strings.Split(out, "\n")
+	if len(lines) != 2 {
+		t.Fatalf("expected 2 lines after wrap; got %d. Output:\n%s", len(lines), out)
+	}
+	for i, line := range lines {
+		if w := lipgloss.Width(line); w > kamichaZoneWidth {
+			t.Errorf("line %d width %d exceeds zone width %d. Line: %q",
+				i, w, kamichaZoneWidth, line)
+		}
+	}
+}
+
+// TestRenderOpponentMeldsTruncatesWithKMore asserts that 4 ankans on a
+// 20-col zone overflow even the 2-line wrap and produce a `+K more`
+// suffix on a third line. Per the truncation scenario.
+func TestRenderOpponentMeldsTruncatesWithKMore(t *testing.T) {
+	g := game.New(7)
+	for _, id := range []uint8{tile.EastWind, tile.SouthWind, tile.WestWind, tile.NorthWind} {
+		g.SetTestMeld(game.SeatEast, game.Meld{
+			Kind:    game.MeldKan,
+			KanKind: game.KanAnkan,
+			Tiles:   []tile.Tile{{ID: id}, {ID: id}, {ID: id}, {ID: id}},
+		})
+	}
+	m := NewWithGame(UnicodeRenderer{}, g)
+
+	out := m.renderOpponentMelds(game.SeatEast, kamichaZoneWidth)
+	lines := strings.Split(out, "\n")
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 lines (2 ankans + +K more); got %d. Output:\n%s",
+			len(lines), out)
+	}
+	last := lines[len(lines)-1]
+	if !strings.Contains(last, "+") || !strings.Contains(last, "more") {
+		t.Errorf("third line missing `+K more` suffix. Line: %q", last)
+	}
+}
+
 func TestRenderOpenMeldsForSeatRendersCorrectSeatMelds(t *testing.T) {
 	g := game.New(7)
 	// Plant a pon of M1 from South onto SeatEast.

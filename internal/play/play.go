@@ -39,6 +39,17 @@ const (
 	targetHeight = 24
 )
 
+// Per-zone column budgets in the four-quadrant mid-row layout. Sum
+// equals targetWidth: 20 + 36 + 20 = 76 cols of content + lipgloss
+// internal padding fills the rest. Used by the opponent meld renderer
+// to decide between one-line, wrap, and truncate-with-+K-more layouts.
+const (
+	kamichaZoneWidth  = 20
+	centreZoneWidth   = 36
+	shimochaZoneWidth = 20
+	toimenZoneWidth   = targetWidth
+)
+
 // peekUnknown is the sentinel `PeekShanten()` returns before the player has
 // pressed `?` — the shanten cache is unpopulated.
 const peekUnknown = -99
@@ -1090,12 +1101,18 @@ func (m Model) renderToimenRow() string {
 		score = m.match.Scores()[game.SeatNorth]
 	}
 	label := labelStyle.Render(fmt.Sprintf("        Toimen — North · %d", score))
+	melds := m.renderOpponentMelds(game.SeatNorth, toimenZoneWidth)
 	row := m.renderBackRow(13)
 	pond := renderPondZone(m.Pond(game.SeatNorth), m.renderer)
-	if pond == "" {
-		return label + "\n" + row
+	parts := []string{label}
+	if melds != "" {
+		parts = append(parts, melds)
 	}
-	return label + "\n" + row + "\n" + pond
+	parts = append(parts, row)
+	if pond != "" {
+		parts = append(parts, pond)
+	}
+	return strings.Join(parts, "\n")
 }
 
 func (m Model) renderBackRow(count int) string {
@@ -1112,28 +1129,38 @@ func (m Model) renderMidRow() string {
 	shimo := m.renderShimochaColumn()
 	centre := m.renderCentreInfo()
 
-	kamiStyled := lipgloss.NewStyle().Width(20).Render(kami)
-	centreStyled := lipgloss.NewStyle().Width(36).Render(centre)
-	shimoStyled := lipgloss.NewStyle().Width(20).Render(shimo)
+	kamiStyled := lipgloss.NewStyle().Width(kamichaZoneWidth).Render(kami)
+	centreStyled := lipgloss.NewStyle().Width(centreZoneWidth).Render(centre)
+	shimoStyled := lipgloss.NewStyle().Width(shimochaZoneWidth).Render(shimo)
 	return lipgloss.JoinHorizontal(lipgloss.Top, kamiStyled, centreStyled, shimoStyled)
 }
 
 func (m Model) renderKamichaColumn() string {
 	label := labelStyle.Render("Kamicha · East" + m.scoreSuffix(game.SeatEast))
+	melds := m.renderOpponentMelds(game.SeatEast, kamichaZoneWidth)
 	pond := renderPondZone(m.Pond(game.SeatEast), m.renderer)
-	if pond == "" {
-		return label
+	parts := []string{label}
+	if melds != "" {
+		parts = append(parts, melds)
 	}
-	return label + "\n" + pond
+	if pond != "" {
+		parts = append(parts, pond)
+	}
+	return strings.Join(parts, "\n")
 }
 
 func (m Model) renderShimochaColumn() string {
 	label := labelStyle.Render("Shimocha · West" + m.scoreSuffix(game.SeatWest))
+	melds := m.renderOpponentMelds(game.SeatWest, shimochaZoneWidth)
 	pond := renderPondZone(m.Pond(game.SeatWest), m.renderer)
-	if pond == "" {
-		return label
+	parts := []string{label}
+	if melds != "" {
+		parts = append(parts, melds)
 	}
-	return label + "\n" + pond
+	if pond != "" {
+		parts = append(parts, pond)
+	}
+	return strings.Join(parts, "\n")
 }
 
 func (m Model) renderCentreInfo() string {
@@ -1225,20 +1252,110 @@ func (m Model) renderOpenMeldsForSeat(seat game.Seat) string {
 		if i > 0 {
 			blocks = append(blocks, m.handGap())
 		}
-		marker := openMeldMarker(meld)
-		calledIdx := calledTileIndex(meld)
-		if calledIdx < 0 {
-			blocks = append(blocks, lipgloss.NewStyle().Render(marker+" "))
-		}
-		for j, t := range meld.Tiles {
-			if j == calledIdx {
-				blocks = append(blocks, lipgloss.NewStyle().Render(marker))
-			}
-			tileLines := m.renderer.Tile(t)
-			blocks = append(blocks, strings.Join(tileLines, "\n"))
-		}
+		blocks = append(blocks, m.renderSingleMeld(meld))
 	}
 	return lipgloss.JoinHorizontal(lipgloss.Top, blocks...)
+}
+
+// renderSingleMeld renders one open meld as a horizontally-joined block:
+// seat-source marker attached to the called tile (or as a meld-level
+// prefix for ankan), then the meld's tiles. Used by both the multi-meld
+// joiner and the per-zone wrap/truncate logic in renderOpponentMelds.
+func (m Model) renderSingleMeld(meld game.Meld) string {
+	marker := openMeldMarker(meld)
+	calledIdx := calledTileIndex(meld)
+	parts := make([]string, 0, len(meld.Tiles)+2)
+	if calledIdx < 0 {
+		parts = append(parts, lipgloss.NewStyle().Render(marker+" "))
+	}
+	for j, t := range meld.Tiles {
+		if j == calledIdx {
+			parts = append(parts, lipgloss.NewStyle().Render(marker))
+		}
+		tileLines := m.renderer.Tile(t)
+		parts = append(parts, strings.Join(tileLines, "\n"))
+	}
+	return lipgloss.JoinHorizontal(lipgloss.Top, parts...)
+}
+
+// renderOpponentMelds renders an opponent seat's open melds inside a
+// fixed-width zone. Layout cascade:
+//
+//  1. Empty meld list → "".
+//  2. Single-line block fits in zoneWidth → return it as-is.
+//  3. Block exceeds zoneWidth → wrap by greedily packing melds onto
+//     up to 2 lines.
+//  4. Even 2 lines do not fit all melds → truncate at the first N
+//     melds that fit, then append `+K more` on a 3rd line.
+//
+// Used by the four-quadrant per-opponent zone renderers (Kamicha,
+// Toimen, Shimocha) so live play surfaces what each bot has called.
+func (m Model) renderOpponentMelds(seat game.Seat, zoneWidth int) string {
+	if m.game == nil {
+		return ""
+	}
+	melds := m.game.Melds(seat)
+	if len(melds) == 0 {
+		return ""
+	}
+	full := m.renderOpenMeldsForSeat(seat)
+	if lipgloss.Width(full) <= zoneWidth {
+		return full
+	}
+	// Greedy fit: pack melds left-to-right onto up to 2 lines, each
+	// line bounded by zoneWidth. Inter-meld gap matches handGap() to
+	// stay consistent with the single-line meld block.
+	gap := m.handGap()
+	gapWidth := lipgloss.Width(gap)
+	const maxLines = 2
+	lines := make([][]string, 0, maxLines)
+	current := []string{}
+	currentWidth := 0
+	consumed := 0
+	for _, meld := range melds {
+		block := m.renderSingleMeld(meld)
+		w := lipgloss.Width(block)
+		need := w
+		if len(current) > 0 {
+			need += gapWidth
+		}
+		if currentWidth+need <= zoneWidth {
+			if len(current) > 0 {
+				current = append(current, gap)
+			}
+			current = append(current, block)
+			currentWidth += need
+			consumed++
+			continue
+		}
+		// Current line is full. Start a new line if budget allows.
+		if len(current) > 0 {
+			lines = append(lines, current)
+			current = nil
+		}
+		if len(lines) >= maxLines {
+			break
+		}
+		// Single-meld line: even if it overflows zoneWidth alone, place
+		// it on its own line (better than dropping). zoneWidth = 20 fits
+		// any 3-tile pon (~10 cols) and any 4-tile kan (~16 cols) under
+		// Unicode, so this branch is the typical wrap path.
+		current = []string{block}
+		currentWidth = w
+		consumed++
+	}
+	if len(current) > 0 && len(lines) < maxLines {
+		lines = append(lines, current)
+	}
+	rendered := make([]string, 0, len(lines)+1)
+	for _, lineParts := range lines {
+		rendered = append(rendered, lipgloss.JoinHorizontal(lipgloss.Top, lineParts...))
+	}
+	if remaining := len(melds) - consumed; remaining > 0 {
+		rendered = append(rendered,
+			labelStyle.Render(fmt.Sprintf("+%d more", remaining)))
+	}
+	return lipgloss.JoinVertical(lipgloss.Top, rendered...)
 }
 
 // openMeldMarker returns the bracketed seat-source marker for an open meld.
