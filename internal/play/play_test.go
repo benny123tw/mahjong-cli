@@ -2110,6 +2110,350 @@ func TestOpponentZonesIncludeMelds(t *testing.T) {
 // melds produces an empty string, so the four-quadrant layout stays
 // byte-identical to the pre-change rendering. Per the Play Screen Layout
 // requirement (zero-meld scenario).
+// TestHumanKanLegalAcrossStates parameterized over the 5 cases in the
+// K-liveness example table from the Keybinding Map requirement.
+func TestHumanKanLegalAcrossStates(t *testing.T) {
+	makeFiller := func() []tile.Tile {
+		return []tile.Tile{
+			{ID: tile.M2},
+			{ID: tile.M3},
+			{ID: tile.M4},
+			{ID: tile.P2},
+			{ID: tile.P3},
+			{ID: tile.P4},
+			{ID: tile.S2},
+			{ID: tile.S3},
+			{ID: tile.S4},
+			{ID: tile.M9},
+		}
+	}
+
+	cases := []struct {
+		name      string
+		setup     func() *game.Game
+		wantLegal bool
+	}{
+		{
+			name: "ankan eligible no riichi",
+			setup: func() *game.Game {
+				g := game.New(7)
+				h := append([]tile.Tile{
+					{ID: tile.P5}, {ID: tile.P5}, {ID: tile.P5}, {ID: tile.P5},
+				}, makeFiller()...)
+				h = append(h, tile.Tile{ID: tile.M1})
+				g.SetTestHand(game.SeatSouth, h)
+				g.SetTestState(game.StateAwaitingDiscard{Player: game.SeatSouth})
+				return g
+			},
+			wantLegal: true,
+		},
+		{
+			name: "shouminkan eligible no riichi",
+			setup: func() *game.Game {
+				g := game.New(7)
+				h := append([]tile.Tile{{ID: tile.M1}}, makeFiller()...)
+				h = append(h, []tile.Tile{{ID: tile.S5}, {ID: tile.S6}, {ID: tile.S7}}...)
+				g.SetTestHand(game.SeatSouth, h)
+				g.SetTestMeld(game.SeatSouth, game.Meld{
+					Kind:  game.MeldPon,
+					Tiles: []tile.Tile{{ID: tile.M1}, {ID: tile.M1}, {ID: tile.M1}},
+					From:  game.SeatEast,
+				})
+				g.SetTestState(game.StateAwaitingDiscard{Player: game.SeatSouth})
+				return g
+			},
+			wantLegal: true,
+		},
+		{
+			name: "ankan eligible but riichi declared",
+			setup: func() *game.Game {
+				g := game.New(7)
+				h := append([]tile.Tile{
+					{ID: tile.P5}, {ID: tile.P5}, {ID: tile.P5}, {ID: tile.P5},
+				}, makeFiller()...)
+				h = append(h, tile.Tile{ID: tile.M1})
+				g.SetTestHand(game.SeatSouth, h)
+				g.SetTestState(game.StateAwaitingDiscard{Player: game.SeatSouth})
+				g.SetTestRiichiDeclared(game.SeatSouth, true)
+				return g
+			},
+			wantLegal: false,
+		},
+		{
+			name: "only 3-of-a-kind no matching pon",
+			setup: func() *game.Game {
+				g := game.New(7)
+				h := append([]tile.Tile{
+					{ID: tile.P5}, {ID: tile.P5}, {ID: tile.P5},
+				}, makeFiller()...)
+				h = append(h, []tile.Tile{{ID: tile.M1}, {ID: tile.M5}}...)
+				g.SetTestHand(game.SeatSouth, h)
+				g.SetTestState(game.StateAwaitingDiscard{Player: game.SeatSouth})
+				return g
+			},
+			wantLegal: false,
+		},
+		{
+			name: "non-AwaitingDiscard state",
+			setup: func() *game.Game {
+				g := game.New(7)
+				h := append([]tile.Tile{
+					{ID: tile.P5}, {ID: tile.P5}, {ID: tile.P5}, {ID: tile.P5},
+				}, makeFiller()...)
+				g.SetTestHand(game.SeatSouth, h)
+				g.SetTestState(game.StateAwaitingDraw{Player: game.SeatSouth})
+				return g
+			},
+			wantLegal: false,
+		},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			g := c.setup()
+			m := NewWithGame(UnicodeRenderer{}, g)
+			if got := humanKanLegal(m); got != c.wantLegal {
+				t.Errorf("humanKanLegal() = %v, want %v", got, c.wantLegal)
+			}
+		})
+	}
+}
+
+// TestActionFooterKLiveWhenAnkanEligible asserts that the action footer
+// styles `K Kan` with `liveKeyStyle` when the human has 4-of-a-kind in
+// AwaitingDiscard{Human} with no riichi. Per the K-live action-footer
+// scenario in the Keybinding Map requirement.
+func TestActionFooterKLiveWhenAnkanEligible(t *testing.T) {
+	g := game.New(7)
+	g.SetTestHand(game.SeatSouth, []tile.Tile{
+		{ID: tile.P5},
+		{ID: tile.P5},
+		{ID: tile.P5},
+		{ID: tile.P5},
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.M4},
+		{ID: tile.P2},
+		{ID: tile.P3},
+		{ID: tile.P4},
+		{ID: tile.S2},
+		{ID: tile.S3},
+		{ID: tile.S4},
+		{ID: tile.M9},
+	})
+	g.SetTestState(game.StateAwaitingDiscard{Player: game.SeatSouth})
+
+	m := NewWithGame(UnicodeRenderer{}, g)
+	footer := m.renderFooter()
+	live := liveKeyStyle.Render("K Kan")
+	greyed := greyedKeyStyle.Render("K Kan")
+	if !strings.Contains(footer, live) {
+		t.Errorf("footer missing live-styled `K Kan`. Want substring %q.\nFooter: %q", live, footer)
+	}
+	if strings.Contains(footer, greyed) {
+		t.Errorf("footer contains greyed-styled `K Kan` when it should be live. Footer: %q", footer)
+	}
+}
+
+// TestActionFooterKGreyedWhenIneligible asserts that the action footer
+// styles `K Kan` with `greyedKeyStyle` when the human has neither ankan
+// nor shouminkan eligibility in AwaitingDiscard{Human}. Per the K-greyed
+// scenario in the Keybinding Map requirement.
+func TestActionFooterKGreyedWhenIneligible(t *testing.T) {
+	g := game.New(7)
+	g.SetTestHand(game.SeatSouth, []tile.Tile{
+		{ID: tile.P5},
+		{ID: tile.P5},
+		{ID: tile.P5},
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.M4},
+		{ID: tile.P2},
+		{ID: tile.P3},
+		{ID: tile.P4},
+		{ID: tile.S2},
+		{ID: tile.S3},
+		{ID: tile.S4},
+		{ID: tile.M1},
+		{ID: tile.M9},
+	})
+	g.SetTestState(game.StateAwaitingDiscard{Player: game.SeatSouth})
+
+	m := NewWithGame(UnicodeRenderer{}, g)
+	footer := m.renderFooter()
+	live := liveKeyStyle.Render("K Kan")
+	greyed := greyedKeyStyle.Render("K Kan")
+	if !strings.Contains(footer, greyed) {
+		t.Errorf(
+			"footer missing greyed-styled `K Kan`. Want substring %q.\nFooter: %q",
+			greyed,
+			footer,
+		)
+	}
+	if strings.Contains(footer, live) {
+		t.Errorf("footer contains live-styled `K Kan` when it should be greyed. Footer: %q", footer)
+	}
+}
+
+// TestHandleKanDeclaresAnkan asserts that pressing K with a 4-of-a-kind
+// in hand during AwaitingDiscard{Human} fires the ankan input and the
+// engine transitions out of the original state. Per the K-declares-ankan
+// scenario in the Keybinding Map requirement.
+func TestHandleKanDeclaresAnkan(t *testing.T) {
+	g := game.New(7)
+	g.SetTestHand(game.SeatSouth, []tile.Tile{
+		{ID: tile.P5},
+		{ID: tile.P5},
+		{ID: tile.P5},
+		{ID: tile.P5},
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.M4},
+		{ID: tile.P2},
+		{ID: tile.P3},
+		{ID: tile.P4},
+		{ID: tile.S2},
+		{ID: tile.S3},
+		{ID: tile.S4},
+		{ID: tile.M9},
+	})
+	g.SetTestState(game.StateAwaitingDiscard{Player: game.SeatSouth})
+
+	m := NewWithGame(UnicodeRenderer{}, g)
+	m = m.handleKan()
+
+	if m.ackText != "ankan declared" {
+		t.Errorf("ackText = %q, want %q", m.ackText, "ankan declared")
+	}
+	melds := m.game.Melds(game.SeatSouth)
+	if len(melds) != 1 || melds[0].Kind != game.MeldKan || melds[0].KanKind != game.KanAnkan {
+		t.Errorf("south melds after ankan = %+v, want one MeldKan{KanAnkan}", melds)
+	}
+}
+
+// TestHandleKanDeclaresShouminkan asserts that pressing K with an existing
+// open MeldPon plus the 4th matching tile in hand fires the shouminkan
+// input and the engine moves to AwaitingChankan{Declarer: Human, UpgradeTile}.
+// Per the K-declares-shouminkan scenario in the Keybinding Map requirement.
+func TestHandleKanDeclaresShouminkan(t *testing.T) {
+	g := game.New(7)
+	g.SetTestHand(game.SeatSouth, []tile.Tile{
+		{ID: tile.M1},
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.M4},
+		{ID: tile.P2},
+		{ID: tile.P3},
+		{ID: tile.P4},
+		{ID: tile.S2},
+		{ID: tile.S3},
+		{ID: tile.S4},
+		{ID: tile.S5},
+		{ID: tile.S6},
+		{ID: tile.S7},
+	})
+	g.SetTestMeld(game.SeatSouth, game.Meld{
+		Kind:  game.MeldPon,
+		Tiles: []tile.Tile{{ID: tile.M1}, {ID: tile.M1}, {ID: tile.M1}},
+		From:  game.SeatEast,
+	})
+	g.SetTestState(game.StateAwaitingDiscard{Player: game.SeatSouth})
+
+	m := NewWithGame(UnicodeRenderer{}, g)
+	m = m.handleKan()
+
+	if m.ackText != "shouminkan declared" {
+		t.Errorf("ackText = %q, want %q", m.ackText, "shouminkan declared")
+	}
+	st, ok := m.game.State().(game.StateAwaitingChankan)
+	if !ok {
+		t.Fatalf("state after shouminkan = %T, want StateAwaitingChankan", m.game.State())
+	}
+	if st.Declarer != game.SeatSouth {
+		t.Errorf("AwaitingChankan.Declarer = %v, want SeatSouth", st.Declarer)
+	}
+	if st.UpgradeTile.ID != tile.M1 {
+		t.Errorf("AwaitingChankan.UpgradeTile.ID = %v, want M1", st.UpgradeTile.ID)
+	}
+}
+
+// TestHandleKanDeclaresMinkan asserts that pressing K from AwaitingClaims
+// when the human has 3 matching tiles submits the minkan claim, the engine
+// leaves AwaitingClaims, and the human gains a MeldKan with KanMinkan.
+// Per the K-submits-minkan scenario in the Keybinding Map requirement.
+func TestHandleKanDeclaresMinkan(t *testing.T) {
+	g := game.New(7)
+	g.SetTestHand(game.SeatSouth, []tile.Tile{
+		{ID: tile.P5},
+		{ID: tile.P5},
+		{ID: tile.P5},
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.M4},
+		{ID: tile.S2},
+		{ID: tile.S3},
+		{ID: tile.S4},
+		{ID: tile.EastWind},
+		{ID: tile.SouthWind},
+		{ID: tile.WestWind},
+		{ID: tile.NorthWind},
+	})
+	g.SetTestState(game.StateAwaitingClaims{
+		Discard:   tile.Tile{ID: tile.P5},
+		Discarder: game.SeatEast,
+	})
+
+	m := NewWithGame(UnicodeRenderer{}, g)
+	m = m.handleKan()
+
+	if _, stillClaims := m.game.State().(game.StateAwaitingClaims); stillClaims {
+		t.Errorf("state still AwaitingClaims after minkan; want transition")
+	}
+	melds := m.game.Melds(game.SeatSouth)
+	if len(melds) != 1 || melds[0].Kind != game.MeldKan || melds[0].KanKind != game.KanMinkan {
+		t.Errorf("south melds after minkan = %+v, want one MeldKan{KanMinkan}", melds)
+	}
+}
+
+// TestHandleKanGreyedDuringRiichi asserts that pressing K while the human
+// has declared riichi surfaces a footer note and leaves state untouched.
+// Per the K-greyed-during-riichi scenario in the Keybinding Map requirement.
+func TestHandleKanGreyedDuringRiichi(t *testing.T) {
+	g := game.New(7)
+	g.SetTestHand(game.SeatSouth, []tile.Tile{
+		{ID: tile.P5},
+		{ID: tile.P5},
+		{ID: tile.P5},
+		{ID: tile.P5},
+		{ID: tile.M2},
+		{ID: tile.M3},
+		{ID: tile.M4},
+		{ID: tile.P2},
+		{ID: tile.P3},
+		{ID: tile.P4},
+		{ID: tile.S2},
+		{ID: tile.S3},
+		{ID: tile.S4},
+		{ID: tile.M9},
+	})
+	g.SetTestState(game.StateAwaitingDiscard{Player: game.SeatSouth})
+	g.SetTestRiichiDeclared(game.SeatSouth, true)
+
+	m := NewWithGame(UnicodeRenderer{}, g)
+	m = m.handleKan()
+
+	if m.ackText != "kan: not allowed during riichi" {
+		t.Errorf("ackText = %q, want %q", m.ackText, "kan: not allowed during riichi")
+	}
+	st, ok := m.game.State().(game.StateAwaitingDiscard)
+	if !ok || st.Player != game.SeatSouth {
+		t.Errorf("state after K-during-riichi = %v, want AwaitingDiscard{South}", m.game.State())
+	}
+	if len(m.game.Melds(game.SeatSouth)) != 0 {
+		t.Errorf("melds appended on K-during-riichi: %+v", m.game.Melds(game.SeatSouth))
+	}
+}
+
 func TestRenderOpponentMeldsZeroMeldCase(t *testing.T) {
 	g := game.New(7)
 	m := NewWithGame(UnicodeRenderer{}, g)

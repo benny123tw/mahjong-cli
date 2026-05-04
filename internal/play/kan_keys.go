@@ -67,6 +67,30 @@ func (m Model) handleKan() Model {
 	return m
 }
 
+// humanKanLegal reports whether the human can declare ankan or shouminkan
+// from the current state. True only during AwaitingDiscard{Human} with no
+// active riichi and at least one eligible declaration (ankan or shouminkan).
+func humanKanLegal(m Model) bool {
+	if m.game == nil {
+		return false
+	}
+	s, ok := m.game.State().(game.StateAwaitingDiscard)
+	if !ok || s.Player != HumanSeat {
+		return false
+	}
+	if m.game.IsRiichiDeclared(HumanSeat) {
+		return false
+	}
+	hd := m.game.Hand(HumanSeat)
+	if _, ok := firstAnkanID(hd); ok {
+		return true
+	}
+	if _, ok := firstShouminkanID(hd, m.game.Melds(HumanSeat)); ok {
+		return true
+	}
+	return false
+}
+
 // firstAnkanID returns the lowest tile ID for which the hand contains
 // exactly 4 copies. Returns ok=false when no concealed 4-of-a-kind exists.
 func firstAnkanID(hand []tile.Tile) (uint8, bool) {

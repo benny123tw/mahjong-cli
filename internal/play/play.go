@@ -1439,13 +1439,18 @@ func (m Model) renderFooter() string {
 			return cf
 		}
 	}
+	kanLive := humanKanLegal(m)
 	parts := make([]string, 0, len(FooterKeys))
 	for _, b := range FooterKeys {
 		s := fmt.Sprintf("%s %s", b.Key, b.Label)
-		if b.Greyed {
-			s = greyedKeyStyle.Render(s)
-		} else {
+		live := !b.Greyed
+		if b.Key == "K" {
+			live = kanLive
+		}
+		if live {
 			s = liveKeyStyle.Render(s)
+		} else {
+			s = greyedKeyStyle.Render(s)
 		}
 		parts = append(parts, s)
 	}
