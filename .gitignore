@@ -3,6 +3,8 @@ openspec/.vector-search.db*
 
 # Build artifacts
 /bin/
+/dist/
+/mahjong
 *.test
 
 # OS / editor cruft

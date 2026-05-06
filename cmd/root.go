@@ -7,10 +7,12 @@ var rootCmd = &cobra.Command{
 	Short: "Riichi mahjong tools",
 }
 
-func Execute() error {
+func Execute(info BuildInfo) error {
+	buildInfo = info
 	return rootCmd.Execute()
 }
 
 func init() {
 	rootCmd.AddCommand(calcCmd)
+	rootCmd.AddCommand(versionCmd)
 }

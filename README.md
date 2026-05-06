@@ -11,10 +11,24 @@ in `openspec/specs/`, archived change history in `openspec/changes/archive/`.
 
 ## Install
 
-Requires Go 1.26+.
+Pre-built binary (recommended):
 
 ```sh
-go install github.com/benny123tw/mahjong-cli@latest
+curl -sSfL https://raw.githubusercontent.com/benny123tw/mahjong-cli/main/install.sh \
+  | sh -s -- -b /usr/local/bin
+```
+
+Pin a specific version by appending the tag:
+
+```sh
+curl -sSfL https://raw.githubusercontent.com/benny123tw/mahjong-cli/main/install.sh \
+  | sh -s -- -b /usr/local/bin v0.1.0
+```
+
+Or use Go (requires Go 1.26+):
+
+```sh
+go install github.com/benny123tw/mahjong-cli/cmd/mahjong@latest
 ```
 
 Or build from source:
@@ -22,7 +36,7 @@ Or build from source:
 ```sh
 git clone https://github.com/benny123tw/mahjong-cli
 cd mahjong-cli
-go build -o mahjong .
+go build -o mahjong ./cmd/mahjong
 ```
 
 ## Usage
@@ -86,7 +100,8 @@ default (toggle with `--no-akadora`).
 ## Project layout
 
 ```
-cmd/                       # cobra subcommands (play, calc, root)
+cmd/mahjong/               # binary entrypoint (main package)
+cmd/                       # cobra subcommands (play, calc, version, root)
 internal/play/             # Bubble Tea TUI: model, render, keys, end panel
 internal/game/             # state machine, match progression, payouts, kan flow
 internal/riichi/
