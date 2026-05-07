@@ -66,18 +66,23 @@ detect_platform() {
   log_debug "detected platform: $OS/$ARCH"
 }
 
-# Get latest release tag from GitHub
+# Get latest release tag from GitHub.
+#
+# Uses the public /releases/latest redirect rather than api.github.com,
+# which is rate-limited to 60 unauthenticated requests/hour per IP and
+# returns 403 once the budget is exhausted.
 get_latest_tag() {
+  url="https://github.com/benny123tw/mahjong-cli/releases/latest"
   if command -v curl >/dev/null 2>&1; then
-    curl -sSfL "https://api.github.com/repos/benny123tw/mahjong-cli/releases/latest" |
-      grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/'
+    final=$(curl -sLI -o /dev/null -w '%{url_effective}' "$url")
   elif command -v wget >/dev/null 2>&1; then
-    wget -qO- "https://api.github.com/repos/benny123tw/mahjong-cli/releases/latest" |
-      grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/'
+    final=$(wget --max-redirect=10 --server-response -O /dev/null "$url" 2>&1 |
+      awk '/^  Location: /{loc=$2} END{print loc}')
   else
     log_err "curl or wget required"
     exit 1
   fi
+  echo "$final" | sed -E 's|.*/tag/([^/?]+).*$|\1|'
 }
 
 # Download file
